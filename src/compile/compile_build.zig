@@ -1835,6 +1835,11 @@ pub const BuildEnv = struct {
             self.gpa.free(canon);
             return error.PathOutsideWorkspace;
         }
+        // punkroc: `import Foo` also finds `Foo.punk`.
+        if (try self.filesystem.preferPunkSibling(self.gpa, canon)) |punk_path| {
+            self.gpa.free(canon);
+            return punk_path;
+        }
         return canon;
     }
 

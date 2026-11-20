@@ -1,0 +1,12 @@
+module Math exposing (double, sumOfSquares)
+
+{-| Twice the number. -}
+double : I64 -> I64
+double = fn x ->
+    x * 2
+
+sumOfSquares : List I64 -> I64
+sumOfSquares = fn xs ->
+    xs
+        |> List.map (fn x -> x * x)
+        |> List.sum

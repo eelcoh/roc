@@ -93,6 +93,7 @@ const reporting = @import("reporting");
 const parse = @import("parse");
 const tracy = @import("tracy");
 const ctx_mod = @import("ctx");
+const punk = @import("punk");
 const compile = @import("compile");
 const can = @import("can");
 const check = @import("check");
@@ -3227,13 +3228,21 @@ fn stageDefaultApp(
     purpose: default_app.Purpose,
 ) (Allocator.Error || error{CliError})!?default_app.Staged {
     const max_source_size = 256 * 1024 * 1024; // 256 MB
-    const source = std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, file_path, ctx.gpa, .limited(max_source_size)) catch |err| switch (base.read_file_failure.kind(err)) {
+    const raw_source = std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, file_path, ctx.gpa, .limited(max_source_size)) catch |err| switch (base.read_file_failure.kind(err)) {
         .out_of_memory => return error.OutOfMemory,
         // Any other read failure (e.g. file not found) means this isn't a
         // default app to handle here; fall through to the normal path.
         .file_not_found, .other => return null,
     };
 
+    // punkroc: a `.punk` file is translated to Roc before it is looked at.
+    const source = if (punk.isPunkPath(file_path)) blk: {
+        defer ctx.gpa.free(raw_source);
+        break :blk punk.toRoc(ctx.gpa, file_path, raw_source) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ParseError => return error.CliError,
+        };
+    } else raw_source;
     defer ctx.gpa.free(source);
 
     // Relative package paths in the header are written relative to the user's

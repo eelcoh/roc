@@ -241,6 +241,7 @@ pub const ModuleType = enum {
     check,
     tracy,
     builtins,
+    punk,
     ctx,
     build_options,
     layout_shape,
@@ -328,8 +329,13 @@ pub const ModuleType = enum {
                 .extra_imports = &.{ "vendor_parse_float", "vendor_ryu", "roc_str_view" },
                 .tests = .{ .unit = .{ .aggregators = &.{"builtins tests"} } },
             },
+            .punk => .{
+                .root = "src/punk/mod.zig",
+                .tests = .{ .unit = .{} },
+            },
             .ctx => .{
                 .root = "src/ctx/mod.zig",
+                .deps = &.{.punk},
                 .tests = .{ .unit = .{} },
             },
             .build_options => .{
@@ -589,6 +595,7 @@ pub const RocModules = struct {
     can: *Module,
     check: *Module,
     tracy: *Module,
+    punk: *Module,
     ctx: *Module,
     build_options: *Module,
     layout_shape: *Module,

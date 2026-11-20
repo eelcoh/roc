@@ -1,0 +1,12 @@
+app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
+
+import pf.Stdout
+import Math
+import Shape
+
+main! = fn () ->
+    Stdout.line! "double 21 = ${I64.toStr (Math.double 21)}"
+    Stdout.line! "sum of squares = ${I64.toStr (Math.sumOfSquares [1, 2, 3])}"
+    [Shape.Circle 1.0, Shape.Rect 2.0 3.0]
+        |> List.map Shape.describe
+        |> List.forEach! Stdout.line!

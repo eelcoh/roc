@@ -1408,11 +1408,73 @@ const Emitter = struct {
         }
     }
 
+    /// A module file starts with an Elm-style header, `module Name exposing (..)`.
+    /// Roc wants a type module instead: `Name := [].{ ... }` with the
+    /// definitions inside the block. When the module declares `type Name`,
+    /// that type carries the block.
     fn emitModule(e: *Emitter, items: []Item) Error!void {
+        const module_name = moduleHeaderName(items) orelse {
+            try e.emitItems(items);
+            try e.w("\n");
+            return;
+        };
+
+        // The header and imports stay at the top level; the rest goes in the block.
+        var top: std.ArrayList(Item) = .empty;
+        var inner: std.ArrayList(Item) = .empty;
+        var own_type: ?Item = null;
+        for (items[1..]) |item| {
+            switch (item.kind) {
+                .raw => |r| if (std.mem.startsWith(u8, r, "import")) {
+                    try top.append(e.a, item);
+                    continue;
+                },
+                .type_nominal => |tn| if (own_type == null and std.mem.eql(u8, tn.name, module_name)) {
+                    own_type = item;
+                    continue;
+                },
+                else => {},
+            }
+            try inner.append(e.a, item);
+        }
+
+        // The header's own comments (e.g. a module doc comment) go first.
+        try e.comments(items[0].comments);
+        try e.emitItems(top.items);
+        if (top.items.len > 0) try e.w("\n\n");
+        if (own_type) |t| {
+            try e.comments(t.comments);
+            try e.emitItems(&.{.{ .comments = &.{}, .blank_before = false, .kind = t.kind }});
+        } else {
+            try e.w(module_name);
+            try e.w(" := []");
+        }
+        try e.w(".{");
+        e.indent += 1;
+        try e.nl();
+        try e.emitItems(inner.items);
+        e.indent -= 1;
+        try e.w("\n}\n");
+    }
+
+    fn moduleHeaderName(items: []Item) ?[]const u8 {
+        if (items.len == 0) return null;
+        const raw = switch (items[0].kind) {
+            .raw => |r| r,
+            else => return null,
+        };
+        if (!std.mem.startsWith(u8, raw, "module ")) return null;
+        const rest = std.mem.trimStart(u8, raw["module ".len..], " ");
+        const end = std.mem.findAny(u8, rest, " \n") orelse rest.len;
+        if (end == 0 or !std.ascii.isUpper(rest[0])) return null;
+        return rest[0..end];
+    }
+
+    fn emitItems(e: *Emitter, items: []const Item) Error!void {
         for (items, 0..) |item, i| {
             if (i > 0) {
-                try e.w("\n");
                 if (item.blank_before) try e.w("\n");
+                try e.nl();
             }
             try e.comments(item.comments);
             switch (item.kind) {
@@ -1447,11 +1509,10 @@ const Emitter = struct {
                 },
             }
             for (item.trailing_comments) |c| {
-                try e.w("\n");
+                try e.nl();
                 try e.w(c);
             }
         }
-        try e.w("\n");
     }
 
     fn emitTypeHead(e: *Emitter, name: []const u8, params: [][]const u8) Error!void {

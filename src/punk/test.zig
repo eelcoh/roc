@@ -327,3 +327,52 @@ test "errors" {
     try checkError("r = { a: 1 }\n", 1, "use '='");
     try checkError("x =\n\tfoo\n", 2, "tabs");
 }
+
+test "module header becomes a type module" {
+    try check(
+        \\module Math exposing (double)
+        \\
+        \\import Helper
+        \\
+        \\{-| Twice the number. -}
+        \\double : I64 -> I64
+        \\double = fn x ->
+        \\    x * 2
+        \\
+        \\sumAll = fn xs -> List.sum xs
+    ,
+        \\import Helper
+        \\
+        \\Math := [].{
+        \\    ## Twice the number.
+        \\    double : I64 -> I64
+        \\    double = |x| x * 2
+        \\
+        \\    sum_all = |xs| List.sum(xs)
+        \\}
+        \\
+    );
+}
+
+test "module whose type has the module's name" {
+    try check(
+        \\module Shape exposing (Shape(..), area)
+        \\
+        \\type Shape
+        \\    = Circle F64
+        \\    | Rect F64 F64
+        \\
+        \\area = fn shape ->
+        \\    case shape of
+        \\        Circle r -> 3.0 * r * r
+        \\        Rect w h -> w * h
+    ,
+        \\Shape := [Circle(F64), Rect(F64, F64)].{
+        \\    area = |shape| match shape {
+        \\        Circle(r) => 3.0 * r * r
+        \\        Rect(w, h) => w * h
+        \\    }
+        \\}
+        \\
+    );
+}

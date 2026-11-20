@@ -16,11 +16,42 @@ case r of                               match r {
 type Shape = Circle F64 | Rect F64 F64  Shape := [Circle(F64), Rect(F64, F64)]
 ```
 
+- `mod.zig`: the `punk` compiler module; `toRoc` is what the compiler calls.
 - `translate.zig`: lexer, layout-sensitive parser and Roc emitter.
 - `main.zig`: the `punk2roc` command line tool.
 - `test.zig`: translation tests.
 
-Try it without building the rest of the compiler:
+## In the compiler
+
+The compiler translates `.punk` files as it reads them (`CoreCtx.readFile`),
+so everything after the parser sees ordinary Roc:
+
+```
+zig build roc
+zig-out/bin/roc examples/punk/aoc_day2_functional.punk
+zig-out/bin/roc check examples/punk/aoc_day2_functional.punk
+```
+
+`import Foo` finds `Foo.punk` when there is no `Foo.roc` next to it. A module
+file starts with an Elm-style header; it becomes a Roc type module:
+
+```
+module Math exposing (double)          Math := [].{
+                                           double = |x| x * 2
+double = fn x ->                       }
+    x * 2
+```
+
+When the module declares `type Shape` with the module's own name, that type
+carries the block (`Shape := [Circle(F64), ...].{ area = ... }`). The
+`exposing` list is not checked yet: everything in the module is visible.
+See `examples/punk/imports/`.
+
+A syntax error in a `.punk` file is printed as `file:line:col: message`.
+
+## Without the compiler
+
+Try the translator on its own, without building the rest of the compiler:
 
 ```
 zig test src/punk/test.zig
