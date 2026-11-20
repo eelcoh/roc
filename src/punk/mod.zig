@@ -3,6 +3,7 @@
 //! ordinary Roc.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const translate_mod = @import("translate.zig");
 
 pub const Diagnostic = translate_mod.Diagnostic;
@@ -26,7 +27,10 @@ pub fn toRoc(allocator: std.mem.Allocator, path: []const u8, src: []const u8) Er
     var diag: Diagnostic = .{};
     const roc = translate(arena.allocator(), src, &diag) catch |err| switch (err) {
         error.ParseError => {
-            std.debug.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
+            // Freestanding targets (the wasm REPL and playground) have no stderr.
+            if (comptime builtin.os.tag != .freestanding) {
+                std.debug.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
+            }
             return error.ParseError;
         },
         error.OutOfMemory => return error.OutOfMemory,
