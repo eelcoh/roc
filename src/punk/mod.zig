@@ -24,11 +24,12 @@ pub fn toRoc(allocator: std.mem.Allocator, path: []const u8, src: []const u8) Er
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var diag: Diagnostic = .{};
-    const roc = translate(arena.allocator(), src, &diag) catch |err| {
-        if (err == error.ParseError) {
+    const roc = translate(arena.allocator(), src, &diag) catch |err| switch (err) {
+        error.ParseError => {
             std.debug.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
-        }
-        return err;
+            return error.ParseError;
+        },
+        error.OutOfMemory => return error.OutOfMemory,
     };
     return allocator.dupe(u8, roc);
 }

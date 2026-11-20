@@ -1,7 +1,9 @@
+//! Translation tests for punkroc: punkroc source in, expected Roc source out.
+
 const std = @import("std");
 const punk = @import("translate.zig");
 
-fn check(src: []const u8, expected: []const u8) !void {
+fn check(src: []const u8, expected: []const u8) (punk.Error || error{TestExpectedEqual})!void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
@@ -12,7 +14,7 @@ fn check(src: []const u8, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, out);
 }
 
-fn checkError(src: []const u8, line: u32, msg_part: []const u8) !void {
+fn checkError(src: []const u8, line: u32, msg_part: []const u8) error{ TestExpectedEqual, TestUnexpectedResult }!void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
@@ -21,7 +23,7 @@ fn checkError(src: []const u8, line: u32, msg_part: []const u8) !void {
         return error.TestUnexpectedResult;
     } else |_| {}
     try std.testing.expectEqual(line, diag.line);
-    if (std.mem.indexOf(u8, diag.message, msg_part) == null) {
+    if (std.mem.find(u8, diag.message, msg_part) == null) {
         std.debug.print("message was: {s}\n", .{diag.message});
         return error.TestUnexpectedResult;
     }

@@ -6,7 +6,17 @@
 const std = @import("std");
 const punk = @import("translate.zig");
 
-pub fn main(init: std.process.Init) !void {
+/// Entry point of the `punk2roc` command.
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| {
+        std.debug.print("punk2roc: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+}
+
+const RunError = std.mem.Allocator.Error || std.Io.Writer.Error || std.Io.Dir.WriteFileError;
+
+fn run(init: std.process.Init) RunError!void {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
@@ -21,23 +31,23 @@ pub fn main(init: std.process.Init) !void {
         } else if (input == null) {
             input = args[i];
         } else {
-            return usage(io);
+            usage();
         }
     }
-    const path = input orelse return usage(io);
+    const path = input orelse usage();
 
     const src = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(16 * 1024 * 1024)) catch |err| {
-        try printErr(io, "punk2roc: cannot read {s}: {s}\n", .{ path, @errorName(err) });
+        std.debug.print("punk2roc: cannot read {s}: {s}\n", .{ path, @errorName(err) });
         std.process.exit(1);
     };
 
     var diag: punk.Diagnostic = .{};
     const roc = punk.translate(arena, src, &diag) catch |err| switch (err) {
         error.ParseError => {
-            try printErr(io, "{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
+            std.debug.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
             std.process.exit(1);
         },
-        error.OutOfMemory => return err,
+        error.OutOfMemory => return error.OutOfMemory,
     };
 
     if (output) |out_path| {
@@ -50,14 +60,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn printErr(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [1024]u8 = undefined;
-    var stderr = std.Io.File.stderr().writer(io, &buf);
-    try stderr.interface.print(fmt, args);
-    try stderr.interface.flush();
-}
-
-fn usage(io: std.Io) !void {
-    try printErr(io, "usage: punk2roc <input.punk> [-o <output.roc>]\n", .{});
+fn usage() noreturn {
+    std.debug.print("usage: punk2roc <input.punk> [-o <output.roc>]\n", .{});
     std.process.exit(2);
 }
