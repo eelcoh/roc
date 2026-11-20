@@ -84,10 +84,14 @@ test "pipes are data-first in step 2" {
         \\other =
         \\    input
         \\    |> List.keepIf isGood
+        \\
+        \\ranges = text |> List.mapTry parseRange?
     ,
         \\result = summarize(List.map(parse(input), normalize))
         \\
         \\other = List.keep_if(input, is_good)
+        \\
+        \\ranges = List.map_try(text, parse_range)?
         \\
     );
 }

@@ -775,6 +775,10 @@ const Parser = struct {
 
     fn makeBinop(p: *Parser, op: []const u8, lhs: *Expr, rhs: *Expr) Error!*Expr {
         if (std.mem.eql(u8, op, "|>")) {
+            // `x |> f a?` means `(f x a)?`: the ? applies after piping.
+            if (rhs.* == .try_) {
+                return p.new(Expr, .{ .try_ = try p.makeBinop(op, lhs, rhs.try_) });
+            }
             // data-first: x |> f a  ==  f(x, a)
             if (rhs.* == .app) {
                 var args: std.ArrayList(*Expr) = .empty;
