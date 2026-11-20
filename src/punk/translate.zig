@@ -117,7 +117,7 @@ const keywords = std.StaticStringMap(Tag).initComptime(.{
     .{ "import", .kw_header },
 });
 
-const multi_ops = [_][]const u8{ "|>", "<|", "->", "=>", "==", "/=", "!=", "<=", ">=", "&&", "||", "++", "//", "??", "::" };
+const multi_ops = [_][]const u8{ "..=", "..<", "|>", "<|", "->", "=>", "==", "/=", "!=", "<=", ">=", "&&", "||", "++", "//", "??", "::" };
 const single_ops = "+-*/<>%^!&";
 
 fn isIdentChar(c: u8) bool {
@@ -302,7 +302,7 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
                 tag = .char;
                 text_end = j + 1;
                 i = j + 1;
-            } else if (c == '.') {
+            } else if (c == '.' and !(std.mem.startsWith(u8, src[i..], "..=") or std.mem.startsWith(u8, src[i..], "..<"))) {
                 if (i + 1 < src.len and src[i + 1] == '.') {
                     tag = .double_dot;
                     text_end = i + 2;
@@ -733,15 +733,16 @@ const Parser = struct {
 
     fn opInfo(text: []const u8) ?OpInfo {
         const table = .{
-            .{ "|>", 0, false }, .{ "<|", 0, true },
-            .{ "??", 1, false }, .{ "||", 2, true },
-            .{ "&&", 3, true },  .{ "==", 4, false },
-            .{ "/=", 4, false }, .{ "!=", 4, false },
-            .{ "<", 4, false },  .{ "<=", 4, false },
-            .{ ">", 4, false },  .{ ">=", 4, false },
-            .{ "++", 5, true },  .{ "+", 6, false },
-            .{ "-", 6, false },  .{ "*", 7, false },
-            .{ "/", 7, false },  .{ "//", 7, false },
+            .{ "|>", 0, false },  .{ "<|", 0, true },
+            .{ "??", 1, false },  .{ "||", 2, true },
+            .{ "..=", 5, false }, .{ "..<", 5, false },
+            .{ "&&", 3, true },   .{ "==", 4, false },
+            .{ "/=", 4, false },  .{ "!=", 4, false },
+            .{ "<", 4, false },   .{ "<=", 4, false },
+            .{ ">", 4, false },   .{ ">=", 4, false },
+            .{ "++", 5, true },   .{ "+", 6, false },
+            .{ "-", 6, false },   .{ "*", 7, false },
+            .{ "/", 7, false },   .{ "//", 7, false },
             .{ "%", 7, false },
         };
         inline for (table) |row| {
@@ -1638,10 +1639,12 @@ const Emitter = struct {
                     try e.w(")");
                     return;
                 }
+                // Roc writes ranges without spaces: 1..<5
+                const gap: []const u8 = if (std.mem.startsWith(u8, b.op, "..")) "" else " ";
                 try e.emitBinopChild(b.lhs, info.prec, false);
-                try e.w(" ");
+                try e.w(gap);
                 try e.w(rocOp(b.op));
-                try e.w(" ");
+                try e.w(gap);
                 try e.emitBinopChild(b.rhs, info.prec, true);
             },
             .neg => |inner| {

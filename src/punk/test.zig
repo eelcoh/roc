@@ -290,6 +290,7 @@ test "operators" {
         \\d = first ++ second
         \\e = f -1
         \\g = x - 1
+        \\h = 1..=(n // 2) |> Iter.keepIf (fn d -> n % d == 0) |> List.fromIter
     ,
         \\a = (x + y) * z
         \\b = x + y * z
@@ -297,6 +298,7 @@ test "operators" {
         \\d = first.concat(second)
         \\e = f(-1)
         \\g = x - 1
+        \\h = List.from_iter(Iter.keep_if(1..=(n // 2), |d| n % d == 0))
         \\
     );
 }
