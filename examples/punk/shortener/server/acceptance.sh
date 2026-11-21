@@ -29,7 +29,7 @@ case $backend in
       https://github.com/hermit-os/loader/releases/download/v0.5.6/hermit-loader-x86_64
     accel=()
     [ -w /dev/kvm ] && accel=(-enable-kvm)
-    qemu-system-x86_64 "${accel[@]}" \
+    qemu-system-x86_64 ${accel[@]+"${accel[@]}"} \
       -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
       -smp 1 -m 64M -display none -serial stdio \
       -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

@@ -48,7 +48,7 @@ accel=()
 [ -w /dev/kvm ] && accel=(-enable-kvm)
 # isa-debug-exit: QEMU's exit status is (the program's << 1) | 1, so 3 means the app ended with 0.
 set +e
-qemu-system-x86_64 "${accel[@]}" \
+qemu-system-x86_64 ${accel[@]+"${accel[@]}"} \
     -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
     -smp 1 -m 64M -display none -serial stdio \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
