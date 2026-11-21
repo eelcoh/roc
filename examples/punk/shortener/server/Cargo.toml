@@ -1,0 +1,34 @@
+[package]
+name = "punk-shortener"
+description = "ambit's link shortener, written in punk (../Shortener.punk), on punkroc's server platform."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The library is called `shortener`, with the same `init` and `Config` as
+# ambit's apps/shortener, so that ambit's spec runs unchanged against it
+# (tests/spec.rs). `build.rs` compiles Shortener.punk with `punk build`.
+[lib]
+name = "shortener"
+path = "src/lib.rs"
+
+[[bin]]
+name = "punk-shortener"
+path = "src/main.rs"
+
+# ambit, pinned to the same commit as platforms/server/host.
+[dependencies]
+ambit-caps = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-caps-kv-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-lockdown = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-server = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-server-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+punk-server = { path = "../../../../platforms/server/host" }
+
+[dev-dependencies]
+ambit-server-sim = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true

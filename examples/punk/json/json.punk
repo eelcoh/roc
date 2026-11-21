@@ -1,0 +1,117 @@
+app [main!] { pf: platform "../../../platforms/cli/main.roc", json: "../../../packages/json/main.roc" }
+
+import pf.Stdout
+import json.Value
+import json.Decode as D
+import json.Encode as E
+
+{-| JSON with the `json` package: Elm-style decoders and encoders, written by hand. -}
+
+type alias User =
+    { name : Str
+    , age : Int
+    , email : Maybe Str
+    , tags : List Str
+    }
+
+user : D.Decoder User
+user =
+    D.map4 (fn name, age, email, tags -> { name, age, email, tags })
+        (D.field "name" D.string)
+        (D.field "age" D.int)
+        (D.maybe (D.field "email" D.string))
+        (D.oneOf [D.field "tags" (D.list D.string), D.succeed []])
+
+encodeUser : User -> Value
+encodeUser = fn u ->
+    E.object
+        [ ("name", E.string u.name)
+        , ("age", E.int u.age)
+        , ("email", Maybe.withDefault E.null (Maybe.map E.string u.email))
+        , ("tags", E.list E.string u.tags)
+        ]
+
+type Shape
+    = Circle Float
+    | Rect Float Float
+
+-- A union: the "kind" field says which fields follow.
+shape : D.Decoder Shape
+shape =
+    D.field "kind" D.string
+        |> D.andThen
+            (fn kind ->
+                case kind of
+                    "circle" -> D.map (fn r -> Circle r) (D.field "r" D.float)
+                    "rect" -> D.map2 (fn w, h -> Rect w h) (D.field "w" D.float) (D.field "h" D.float)
+                    _ -> D.fail "unknown kind ${kind}"
+            )
+
+area : Shape -> Float
+area = fn s ->
+    case s of
+        Circle r -> 3.0 * r * r
+        Rect w h -> w * h
+
+roundTrip : Int -> Str -> Str
+roundTrip = fn indent, text ->
+    case Value.parse text of
+        Ok v -> Value.encode indent v
+        Err problem -> "error: ${problem}"
+
+show : Result a D.Error -> (a -> Str) -> Str
+show = fn result, f ->
+    case result of
+        Ok x -> f x
+        Err e -> "error: ${D.errorToString e}"
+
+inputs : List Str
+inputs =
+    [ "{\"name\": \"Ann\", \"age\": 7, \"email\": \"ann@example.com\", \"tags\": [\"a\", \"b\"]}"
+    , "{\"name\": \"Bob\", \"age\": 40}"
+    , "{\"name\": \"Cy\", \"age\": \"old\"}"
+    , "{\"name\": \"Di\", \"age\": 1.5}"
+    , "[1, 2"
+    , "{\"name\": \"Ed\", \"age\": 3, \"tags\": [\"x\", 4]}"
+    ]
+
+main! = fn () ->
+    Stdout.line! "-- users"
+    inputs
+        |> List.map (fn text -> show (D.decodeString user text) (fn u -> E.encode 0 (encodeUser u)))
+        |> List.forEach! Stdout.line!
+
+    Stdout.line! "-- shapes"
+    [ "{\"kind\": \"circle\", \"r\": 2}"
+    , "{\"kind\": \"rect\", \"w\": 2, \"h\": 3.5}"
+    , "{\"kind\": \"star\"}"
+    ]
+        |> List.map (fn text -> show (D.decodeString shape text) (fn s -> F64.toStr (area s)))
+        |> List.forEach! Stdout.line!
+
+    Stdout.line! "-- text"
+    -- Escapes and characters beyond ASCII survive a round trip.
+    tricky = "  {\"s\": \"tab\\there \\\"quoted\\\" \\u00e9 \\ud83d\\ude00\", \"n\": -0.5e-3, \"empty\": [], \"o\": {}}  "
+    Stdout.line! (roundTrip 0 tricky)
+    Stdout.line! (roundTrip 4 tricky)
+
+    -- Bad JSON says what is wrong, and where.
+    ["", "nul", "01", "1.", "\"no end", "{\"a\" 1}", "[1,]", "\"\\x\"", "1 2"]
+        |> List.map (fn text -> "${E.encode 0 (E.string text)} -> ${roundTrip 0 text}")
+        |> List.forEach! Stdout.line!
+
+    Stdout.line! "-- at, index, keyValuePairs, nullable"
+    nested = "{\"user\": {\"names\": [\"first\", \"second\"]}, \"counts\": {\"a\": 1, \"b\": 2}, \"x\": null}"
+    Stdout.line! (show (D.decodeString (D.at ["user", "names"] (D.index 1 D.string)) nested) (fn s -> s))
+    Stdout.line! (show (D.decodeString (D.field "counts" (D.keyValuePairs D.int)) nested) (fn kvs -> kvs |> List.map (fn (k, v) -> "${k}=${String.fromInt v}") |> Str.joinWith ","))
+    Stdout.line! (show (D.decodeString (D.field "x" (D.nullable D.int)) nested) (fn m -> Maybe.withDefault "null" (Maybe.map String.fromInt m)))
+    Stdout.line! (show (D.decodeString (D.at ["user", "names"] (D.index 5 D.string)) nested) (fn s -> s))
+    Stdout.line! (show (D.decodeString (D.field "tags" (D.list D.string)) "{\"tags\": [\"x\", 4]}") (Str.joinWith ","))
+
+-- Compared as text or as a Maybe: `==` on a type that holds itself (Value, D.Error)
+-- makes the compiler hang for now.
+expect Result.map (Value.encode 0) (Value.parse " [true , false,null] ") == Ok "[true,false,null]"
+
+expect Result.toMaybe (D.decodeString (D.list D.int) "[1, 2, 3]") == Just [1, 2, 3]
+
+expect E.encode 0 (E.float 1.5) == "1.5"

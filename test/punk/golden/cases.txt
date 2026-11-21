@@ -27,6 +27,7 @@ currying                currying.punk
 elm                     elm.punk
 fold                    fold.punk
 imports/app             imports/app.punk
+json                    json/json.punk
 numbers                 numbers.punk
 platform/io-stdin       platform/io.punk            lines.txt
 platform/io-file        platform/io.punk            -           lines.txt

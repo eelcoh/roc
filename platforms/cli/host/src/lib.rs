@@ -5,20 +5,21 @@
 //! `main` calls the app's `roc_main`. Behind those functions is ambit's cli platform: the app is
 //! an `ambit_cli::App`, run by ambit's native backend, with ambit's capabilities.
 //!
-//! - `roc.rs`: Roc's values and memory (the only raw-memory code).
+//! - `punk-roc-abi` (`platforms/roc-abi`): Roc's values and memory, the only raw-memory code,
+//!   shared with the server platform.
 //! - `platform.rs`: what each effect does, safe Rust on ambit's capabilities.
 //! - this file: the exported symbols, and the wiring.
 
 #![cfg_attr(test, allow(dead_code))]
 
 mod platform;
-mod roc;
 
 use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_int};
 
 use ambit_cli::{App, Args, Exit, Io};
 use platform::Caps;
+use punk_roc_abi as roc;
 use roc::{RocList, RocStr, RocTry};
 
 #[cfg(not(test))]
@@ -212,7 +213,7 @@ pub unsafe extern "C" fn roc_crashed(bytes: *const u8, len: usize) {
 // reference given back) when it goes out of scope here.
 
 #[unsafe(no_mangle)]
-pub extern "C" fn roc_arg_list() -> RocList {
+pub extern "C" fn roc_arg_list() -> RocList<RocStr> {
     session(|s| RocList::of_strs(&s.caps.args))
 }
 

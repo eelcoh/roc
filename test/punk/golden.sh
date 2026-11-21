@@ -7,6 +7,7 @@
 #     sh test/punk/golden.sh            check
 #     sh test/punk/golden.sh --update   write the expected output anew
 #
+# Server apps are only type-checked here (their crate's cargo test runs them).
 # It fails as well when a program in examples/punk/ has no case, so that a
 # new example cannot be forgotten, when a .punk file there is not laid out
 # as `punk fmt` would, and when src/punk/llms.txt is out of date.
@@ -74,8 +75,23 @@ while read -r line; do
     run_case "$@"
 done < "$work/cases"
 
-# Every app in examples/punk/ needs at least one case.
-for f in $(cd examples/punk && grep -l '^app' $(find . -name '*.punk') | sed 's|^\./||' | sort); do
+# A server app (on platforms/server) can't run here: it is an archive that
+# its Rust crate links and tests (cargo test in its server/ folder, which runs
+# ambit's spec). Here it only has to type-check.
+server_apps=$(cd examples/punk && grep -l '^app.*platforms/server/main.roc' $(find . -name '*.punk') | sed 's|^\./||' | sort)
+for f in $server_apps; do
+    if "$roc" check "examples/punk/$f" > "$work/check" 2>&1; then
+        echo "ok   check $f"
+        passed=$((passed + 1))
+    else
+        echo "FAIL check $f"
+        sed 's/^/     /' "$work/check" | tail -n 30
+        failed=$((failed + 1))
+    fi
+done
+
+# Every other app in examples/punk/ needs at least one case.
+for f in $(cd examples/punk && grep -l '^app' $(find . -name '*.punk') | sed 's|^\./||' | grep -vxF "$server_apps" | sort); do
     if ! awk '{print $2}' "$work/cases" | grep -qxF "$f"; then
         echo "FAIL examples/punk/$f has no case in test/punk/golden/cases.txt"
         failed=$((failed + 1))

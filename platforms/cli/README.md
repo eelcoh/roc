@@ -77,11 +77,12 @@ but has not been tried yet; Windows has no host yet.
   punk app is an `ambit_cli::App`, run by ambit's native backend.
 - `host/src/platform.rs`: what each effect does, in safe Rust on ambit's
   capabilities (`Clock`, `Random`, `Dir` through `Named<OneFile>`, `DirModify`).
-- `host/src/roc.rs`: Roc's `Str`, `List` and `Try` as the app lays them out,
-  the allocator and the refcounts. The only code that reads raw memory. It
-  mirrors the compiler's `src/builtins/str.zig`, `list.zig` and `utils.zig`
-  (`allocateWithRefcount`, `decref`) and `host_abi.zig`. If an upstream merge
-  changes those, the golden tests fail; change this file to match.
+- `../roc-abi` (crate `punk-roc-abi`, shared with the server platform): Roc's
+  `Str`, `List` and `Try` as the app lays them out, the allocator and the
+  refcounts. The only code that reads raw memory. It mirrors the compiler's
+  `src/builtins/str.zig`, `list.zig` and `utils.zig` (`allocateWithRefcount`,
+  `decref`) and `host_abi.zig`. If an upstream merge changes those, the golden
+  tests fail; change that crate to match.
 
 At the end of a run the host checks that every byte the app allocated was
 freed, and says so on stderr when not.
@@ -104,6 +105,6 @@ ambit-cli = { path = "../../../../ambit/platforms/cli/api" }
 ambit-cli-native = { path = "../../../../ambit/platforms/cli/native" }
 ```
 
-The next platforms (`server`, `tui`) are made the same way: a folder under
-`platforms/` with the `.roc` API and a Rust `host/` on the matching ambit
-platform.
+The `server` platform (`platforms/server`) is made the same way, and so will
+`tui` be: a folder under `platforms/` with the `.roc` API and a Rust `host/`
+on the matching ambit platform.

@@ -1,0 +1,19 @@
+[package]
+name = "punk-server"
+description = "Host of punkroc's server platform: a compiled punk app as an ambit server Handler."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A library, not a program: the crate of an app links the app's archive
+# (built by `punk build`) next to this, and its wiring picks the capabilities,
+# as ambit's run-native does. See platforms/server/README.md.
+[lib]
+path = "src/lib.rs"
+
+# ambit is used as a library, pinned to one commit, as in platforms/cli/host.
+[dependencies]
+ambit-caps = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-server = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+punk-roc-abi = { path = "../../roc-abi" }
+tracing = "0.1"
