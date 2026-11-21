@@ -1,0 +1,59 @@
+app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
+
+import pf.Stdout
+
+{-| Advent of Code 2024, day 3: Mull It Over. -}
+
+example1 = "xmul(2,4)%&mul[3,7]!@^do_not_mul(5,5)+mul(32,64]then(mul(11,8)mul(8,5))"
+
+example2 = "xmul(2,4)&mul[3,7]!^don't()_mul(5,5)+mul(32,64](mul(11,8)undo()?mul(8,5))"
+
+main! = fn () ->
+    Stdout.line! "Part 1: ${U64.toStr (part1 example1)}"
+    Stdout.line! "Part 2: ${U64.toStr (part2 example2)}"
+
+-- Everything after a "mul(" may start with "X,Y)"
+part1 : Str -> U64
+part1 = fn memory ->
+    memory
+        |> Str.splitOn "mul("
+        |> List.dropFirst 1
+        |> List.keepOks parseMul
+        |> List.sum
+
+parseMul : Str -> Result U64 _
+parseMul = fn chunk ->
+    case Str.splitOn ")" chunk of
+        [args, ..] ->
+            case Str.splitOn "," args of
+                [x, y] -> Ok (number x? * number y?)
+                _ -> Err NotAMul
+        _ -> Err NotAMul
+
+-- Only 1 to 3 digits count; U64.fromStr alone would also accept "+1"
+number : Str -> Result U64 _
+number = fn digits ->
+    bytes = Str.toUtf8 digits
+    if List.len bytes >= 1 && List.len bytes <= 3 && List.all isDigit bytes then
+        U64.fromStr digits
+    else
+        Err NotANumber
+
+isDigit : U8 -> Bool
+isDigit = fn b ->
+    b >= '0' && b <= '9'
+
+-- Keep the parts between a "do()" and the next "don't()"
+part2 : Str -> U64
+part2 = fn memory ->
+    memory
+        |> Str.splitOn "do()"
+        |> List.map enabledPart
+        |> List.map part1
+        |> List.sum
+
+enabledPart : Str -> Str
+enabledPart = fn chunk ->
+    case Str.splitOn "don't()" chunk of
+        [enabled, ..] -> enabled
+        _ -> chunk

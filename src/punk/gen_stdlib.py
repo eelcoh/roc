@@ -40,6 +40,31 @@ def arity(sig):
     return None
 
 
+def state_first_callback(sig):
+    """For a fold `List(a), state, (state, a -> state) -> state`: the number of
+    parameters of the callback when it takes the state first (Roc), else 0.
+    punkroc passes the state last, as Elm's foldl."""
+    parts, depth, cur = [], 0, ""
+    for c in sig:
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if depth == 0 and c == ",":
+            parts.append(cur.strip())
+            cur = ""
+        else:
+            cur += c
+    parts.append(cur.strip())
+    if len(parts) < 3:
+        return 0
+    state = parts[1]
+    cb = parts[2]
+    cb = cb[1 : cb.index("->") if "->" in cb else cb.index("=>")]
+    params = [x.strip() for x in cb.split(",")]
+    return len(params) if params[0] == state else 0
+
+
 def main(path):
     lines = open(path).read().split("\n")
     ranges = module_ranges(lines)
@@ -64,7 +89,12 @@ def main(path):
                 order = "fn_first"
             else:
                 order = "rotate"
-            print(f'    .{{ "{mod}.{name}", Fn{{ .arity = {n}, .order = .{order} }} }},')
+            extra = ""
+            if order == "reverse":
+                cb = state_first_callback(m.group(2))
+                if cb:
+                    extra = f", .state_last = {cb}"
+            print(f'    .{{ "{mod}.{name}", Fn{{ .arity = {n}, .order = .{order}{extra} }} }},')
 
 
 main(sys.argv[1])

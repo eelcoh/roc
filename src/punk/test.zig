@@ -185,9 +185,31 @@ test "types: nominal, alias, unions" {
         \\run! : List Str => Try {} (Exit I32 | ..)
         \\named : { a | name : Str } -> Str
     ,
-        \\Shape := [Circle(F64), Rect(F64, F64)]
+        \\Shape := [Circle(F64), Rect(F64, F64)].{
+        \\    is_eq = |punk_x, punk_y| match (punk_x, punk_y) {
+        \\        (Circle(punk_a1), Circle(punk_b1)) => punk_a1 == punk_b1
+        \\        (Rect(punk_a1, punk_a2), Rect(punk_b1, punk_b2)) => punk_a1 == punk_b1 and punk_a2 == punk_b2
+        \\        _ => False
+        \\    }
         \\
-        \\Maybe(a) := [Just(a), Nothing]
+        \\    to_hash = |punk_x, punk_h| match punk_x {
+        \\        Circle(punk_a1) => punk_a1.to_hash(Hasher.write_u64(punk_h, 0))
+        \\        Rect(punk_a1, punk_a2) => punk_a2.to_hash(punk_a1.to_hash(Hasher.write_u64(punk_h, 1)))
+        \\    }
+        \\}
+        \\
+        \\Maybe(a) := [Just(a), Nothing].{
+        \\    is_eq = |punk_x, punk_y| match (punk_x, punk_y) {
+        \\        (Just(punk_a1), Just(punk_b1)) => punk_a1 == punk_b1
+        \\        (Nothing, Nothing) => True
+        \\        _ => False
+        \\    }
+        \\
+        \\    to_hash = |punk_x, punk_h| match punk_x {
+        \\        Just(punk_a1) => punk_a1.to_hash(Hasher.write_u64(punk_h, 0))
+        \\        Nothing => Hasher.write_u64(punk_h, 1)
+        \\    }
+        \\}
         \\
         \\Point : { x : F64, y : F64 }
         \\
@@ -376,6 +398,17 @@ test "module whose type has the module's name" {
         \\        Rect w h -> w * h
     ,
         \\Shape := [Circle(F64), Rect(F64, F64)].{
+        \\    is_eq = |punk_x, punk_y| match (punk_x, punk_y) {
+        \\        (Circle(punk_a1), Circle(punk_b1)) => punk_a1 == punk_b1
+        \\        (Rect(punk_a1, punk_a2), Rect(punk_b1, punk_b2)) => punk_a1 == punk_b1 and punk_a2 == punk_b2
+        \\        _ => False
+        \\    }
+        \\
+        \\    to_hash = |punk_x, punk_h| match punk_x {
+        \\        Circle(punk_a1) => punk_a1.to_hash(Hasher.write_u64(punk_h, 0))
+        \\        Rect(punk_a1, punk_a2) => punk_a2.to_hash(punk_a1.to_hash(Hasher.write_u64(punk_h, 1)))
+        \\    }
+        \\
         \\    area = |shape| match shape {
         \\        Circle(r) => 3.0 * r * r
         \\        Rect(w, h) => w * h
@@ -390,7 +423,7 @@ test "builtins take the value they work on last" {
         \\a = List.map double xs
         \\b = Str.splitOn "," text
         \\c = Str.joinWith ", " names
-        \\d = List.fold (fn acc, x -> acc + x) 0 xs
+        \\d = List.fold (fn x, acc -> acc + x) 0 xs
         \\e = List.map2 (fn x, y -> x + y) xs ys
         \\f = Result.withDefault 0 (U64.fromStr s)
         \\g = Result.map double r
@@ -533,48 +566,60 @@ const Files = struct {
 };
 
 const files = Files{ .entries = &.{
-    .{ "app/Math.punk",
-    \\module Math exposing (add, double, Shape(..), Color)
-    \\
-    \\add : I64 -> I64 -> I64
-    \\add = fn a, b -> a + b
-    \\
-    \\double = fn x -> x * 2
-    \\
-    \\secret = fn x -> x
-    \\
-    \\type Shape = Circle F64 | Square F64
-    \\
-    \\type Color = Red | Green
+    .{
+        "app/Grid.punk",
+        \\module Grid exposing (Grid, size)
+        \\
+        \\type alias Grid = List (List U8)
+        \\
+        \\size : Grid -> U64
+        \\size = fn g -> List.len g
     },
-    .{ "app/Text.roc",
-    \\Text := [].{
-    \\    ## Repeat a string.
-    \\    repeat : Str, U64 -> Str
-    \\    repeat = |s, n| s
-    \\
-    \\    pad_left = |s, n, c| s
-    \\
-    \\    shout : Str -> Str
-    \\    shout = |s|
-    \\        x : Str
-    \\        x = s
-    \\        x
-    \\
-    \\    greeting : Str
-    \\    greeting = "hi"
-    \\}
+    .{
+        "app/Math.punk",
+        \\module Math exposing (add, double, Shape(..), Color)
+        \\
+        \\add : I64 -> I64 -> I64
+        \\add = fn a, b -> a + b
+        \\
+        \\double = fn x -> x * 2
+        \\
+        \\secret = fn x -> x
+        \\
+        \\type Shape = Circle F64 | Square F64
+        \\
+        \\type Color = Red | Green
     },
-    .{ "app/../pf/Stdout.roc",
-    \\Stdout := [].{
-    \\    line! : Str => {}
-    \\    write_both! : Str, Str => {}
-    \\}
+    .{
+        "app/Text.roc",
+        \\Text := [].{
+        \\    ## Repeat a string.
+        \\    repeat : Str, U64 -> Str
+        \\    repeat = |s, n| s
+        \\
+        \\    pad_left = |s, n, c| s
+        \\
+        \\    shout : Str -> Str
+        \\    shout = |s|
+        \\        x : Str
+        \\        x = s
+        \\        x
+        \\
+        \\    greeting : Str
+        \\    greeting = "hi"
+        \\}
+    },
+    .{
+        "app/../pf/Stdout.roc",
+        \\Stdout := [].{
+        \\    line! : Str => {}
+        \\    write_both! : Str, Str => {}
+        \\}
     },
 } };
 
 fn checkWith(src: []const u8, expected: []const u8) (punk.Error || error{TestExpectedEqual})!void {
-    const reader = mod.Reader{ .ctx = @constCast(@ptrCast(&files)), .read = Files.read };
+    const reader = mod.Reader{ .ctx = @ptrCast(@constCast(&files)), .read = Files.read };
     const out = try mod.toRocWith(std.testing.allocator, "app/main.punk", src, reader);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings(expected, out);
@@ -584,7 +629,7 @@ fn checkWithError(src: []const u8, line: u32, msg_part: []const u8) error{ TestE
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
-    const resolver = punk.Resolver{ .ctx = @constCast(@ptrCast(&files)), .load = testLoad };
+    const resolver = punk.Resolver{ .ctx = @ptrCast(@constCast(&files)), .load = testLoad };
     if (punk.translateWith(arena.allocator(), src, &diag, resolver)) |out| {
         std.debug.print("expected an error, got:\n{s}\n", .{out});
         return error.TestUnexpectedResult;
@@ -682,7 +727,7 @@ test "modules: the exposing list is checked" {
 test "modules: scanning a Roc module" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const iface = try interface.scanRoc(arena.allocator(), files.entries[1][1]);
+    const iface = try interface.scanRoc(arena.allocator(), files.entries[2][1]);
     try std.testing.expectEqual(@as(?u8, 2), iface.values.get("repeat").?);
     try std.testing.expectEqual(@as(?u8, 3), iface.values.get("pad_left").?);
     try std.testing.expectEqual(@as(?u8, 1), iface.values.get("shout").?);
@@ -694,4 +739,62 @@ test "modules: scanning a Roc module" {
     try std.testing.expectEqual(@as(?u8, null), interface.typeArity(" { a : I64 -> I64 }"));
     try std.testing.expectEqual(@as(?u8, 0), interface.lambdaArity("|| 1"));
     try std.testing.expectEqual(@as(?u8, 2), interface.lambdaArity("|{ a, b }, c| a"));
+}
+
+test "accessor functions" {
+    try check("xs = List.map .name people\n", "xs = List.map(people, |punk_record| punk_record.name)\n");
+    try check("x = (.0) pair\n", "x = (|punk_record| punk_record.0)(pair)\n");
+    try check("x = person.name\n", "x = person.name\n");
+}
+
+test "import exposing with parentheses" {
+    try check("import Grid exposing (Cells, atPoint, Shape(..))\n\nx = 1\n", "import Grid exposing [Cells, at_point, Shape]\n\nx = 1\n");
+}
+
+test "empty sets and dicts are values" {
+    try check("s = Set.empty |> Set.insert 1\n", "s = Set.insert(Set.empty(), 1)\n");
+    try check("d = Dict.empty\n", "d = Dict.empty()\n");
+}
+
+test "multi-line strings" {
+    // Indented between lines of their own: the indentation and the outer line breaks go.
+    try check("example =\n    \"\"\"\n    3   4\n      \"x\" ${name}\n    \"\"\"\n\ny = 1\n", "example = \"3   4\\n  \\\"x\\\" ${name}\"\n\ny = 1\n");
+    // Otherwise the text is kept as it is.
+    try check("x = \"\"\"a\nb\"\"\"\ny = 2\n", "x = \"a\\nb\"\ny = 2\n");
+    try checkError("x = \"\"\"a\n", 1, "unterminated multi-line string");
+    // Line numbers after the string still count its lines.
+    try checkError("x = \"\"\"a\nb\nc\"\"\"\ny = )\n", 4, "expected an expression");
+}
+
+test "folds take the state last, as Elm's foldl" {
+    try check("d = List.fold (fn x, acc -> acc - x) 0 xs\n", "d = List.fold(xs, 0, |acc, x| acc - x)\n");
+    try check("d = Dict.fold (fn k, v, acc -> acc + k * v) 0 dict\n", "d = Dict.fold(dict, 0, |acc, k, v| acc + k * v)\n");
+    // A named function is wrapped; a builtin inside keeps punkroc's order.
+    try check("s = List.fold Set.insert Set.empty xs\n", "s = List.fold(xs, Set.empty(), |punk_s1, punk_s2| Set.insert(punk_s1, punk_s2))\n");
+    // fold_rev already takes the item first.
+    try check("d = List.foldRev (fn x, acc -> acc - x) 0 xs\n", "d = List.fold_rev(xs, 0, |x, acc| acc - x)\n");
+}
+
+test "a type alias with the name of its module" {
+    // In the module: Roc's `Grid` is the module itself, so the alias is `GridAlias`.
+    try check(
+        \\module Grid exposing (Grid, size)
+        \\
+        \\type alias Grid = List (List U8)
+        \\
+        \\size : Grid -> U64
+        \\size = fn g -> List.len g
+        \\
+    ,
+        \\Grid := [].{
+        \\    GridAlias : List(List(U8))
+        \\
+        \\    size : GridAlias -> U64
+        \\    size = |g| List.len(g)
+        \\}
+        \\
+    );
+    // From another module, exposed or qualified.
+    try checkWith("import Grid exposing (Grid, size)\n\nf : Grid -> Grid.Grid -> U64\nf = fn a, b -> size a\n", "import Grid exposing [size]\n\nf : Grid.GridAlias, Grid.GridAlias -> U64\nf = |a, b| size(a)\n");
+    try checkWith("import Grid exposing (Grid)\n\nf : Grid -> U64\nf = fn a -> Grid.size a\n", "import Grid\n\nf : Grid.GridAlias -> U64\nf = |a| Grid.size(a)\n");
 }

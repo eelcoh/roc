@@ -1,0 +1,70 @@
+app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
+
+import pf.Stdout
+import Grid exposing (Grid, Point)
+
+{-| Advent of Code 2024, day 6: Guard Gallivant. -}
+
+example =
+    """
+    ....#.....
+    .........#
+    ..........
+    ..#.......
+    .......#..
+    ..........
+    .#..^.....
+    ........#.
+    #.........
+    ......#...
+    """
+
+type alias Guard = { pos : Point, dir : Point }
+
+type Outcome = Leaves (Set Point) | Loops
+
+main! = fn () ->
+    grid = Grid.parse example
+    case Grid.find '^' grid of
+        Ok start ->
+            guard = { pos = start, dir = { row = -1, col = 0 } }
+            visited = visitedBy grid guard
+            Stdout.line! "Part 1: ${U64.toStr (Set.len visited)}"
+            Stdout.line! "Part 2: ${U64.toStr (part2 grid guard visited)}"
+        Err _ ->
+            Stdout.line! "no guard on the map"
+
+visitedBy : Grid -> Guard -> Set Point
+visitedBy = fn grid, guard ->
+    case patrol (fn p -> Grid.at grid p) guard Set.empty of
+        Leaves visited -> visited
+        Loops -> Set.empty
+
+-- Walk until the guard leaves the map, or comes back to a state it has seen
+patrol : (Point -> U8) -> Guard -> Set Guard -> Outcome
+patrol = fn cell, guard, seen ->
+    if Set.contains guard seen then
+        Loops
+    else
+        ahead = Grid.add guard.pos guard.dir
+        seenNow = Set.insert guard seen
+        case cell ahead of
+            '#' -> patrol cell { guard | dir = turnRight guard.dir } seenNow
+            ' ' -> Leaves (seenNow |> Set.map .pos)
+            _ -> patrol cell { guard | pos = ahead } seenNow
+
+turnRight : Point -> Point
+turnRight = fn { row, col } ->
+    { row = col, col = -row }
+
+-- An obstacle only matters on the guard's path; try each of those cells
+part2 : Grid -> Guard -> Set Point -> U64
+part2 = fn grid, guard, visited ->
+    visited
+        |> Set.toList
+        |> List.dropIf (fn p -> p == guard.pos)
+        |> List.countIf (fn obstacle -> patrol (withObstacle grid obstacle) guard Set.empty == Loops)
+
+withObstacle : Grid -> Point -> Point -> U8
+withObstacle = fn grid, obstacle, p ->
+    if p == obstacle then '#' else Grid.at grid p

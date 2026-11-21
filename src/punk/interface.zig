@@ -28,6 +28,10 @@ pub const Interface = struct {
     /// What the module exposes; null means everything (Roc modules and
     /// `exposing (..)`).
     exposing: ?Exposing = null,
+    /// A punkroc module with a type alias of its own name (`module Grid`
+    /// with `type alias Grid = ...`, as in Elm). In Roc the module itself is
+    /// the type `Grid`, so the alias is written `Grid.GridAlias` there.
+    own_alias: ?[]const u8 = null,
 
     pub const Exposing = struct {
         /// Lowercase names, in Roc spelling.

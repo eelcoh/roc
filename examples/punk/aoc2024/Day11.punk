@@ -1,0 +1,54 @@
+app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
+
+import pf.Stdout
+
+{-| Advent of Code 2024, day 11: Plutonian Pebbles.
+The order of the stones does not matter, only how many of each there are.
+-}
+
+example = "125 17"
+
+type alias Counts = Dict U64 U64
+
+main! = fn () ->
+    stones =
+        example
+            |> Str.splitOn " "
+            |> List.keepOks U64.fromStr
+            |> List.map (fn n -> (n, 1))
+            |> Dict.fromList
+    Stdout.line! "Part 1: ${U64.toStr (total (blinkTimes 25 stones))}"
+    Stdout.line! "Part 2: ${U64.toStr (total (blinkTimes 75 stones))}"
+
+blinkTimes : U64 -> Counts -> Counts
+blinkTimes = fn times, stones ->
+    if times == 0 then stones else blinkTimes (times - 1) (blink stones)
+
+blink : Counts -> Counts
+blink = fn stones ->
+    stones
+        |> Dict.toList
+        |> List.joinMap (fn (stone, count) -> List.map (fn s -> (s, count)) (change stone))
+        |> List.fold addCount Dict.empty
+
+addCount : (U64, U64) -> Counts -> Counts
+addCount = fn (stone, count), counts ->
+    Dict.update stone (fn old -> Ok (Result.withDefault 0 old + count)) counts
+
+change : U64 -> List U64
+change = fn stone ->
+    digits = U64.toStr stone
+    len = Str.countUtf8Bytes digits
+    if stone == 0 then
+        [1]
+    else if len % 2 == 0 then
+        bytes = Str.toUtf8 digits
+        [List.takeFirst (len // 2) bytes, List.dropFirst (len // 2) bytes]
+            |> List.keepOks Str.fromUtf8
+            |> List.keepOks U64.fromStr
+    else
+        [stone * 2024]
+
+total : Counts -> U64
+total = fn stones ->
+    stones |> Dict.values |> List.sum
