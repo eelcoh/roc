@@ -533,54 +533,58 @@ const Files = struct {
 };
 
 const files = Files{ .entries = &.{
-    .{ "app/Math.punk",
-    \\module Math exposing (add, double, Shape(..), Color)
-    \\
-    \\add : I64 -> I64 -> I64
-    \\add = fn a, b -> a + b
-    \\
-    \\double = fn x -> x * 2
-    \\
-    \\secret = fn x -> x
-    \\
-    \\type Shape = Circle F64 | Square F64
-    \\
-    \\type Color = Red | Green
+    .{
+        "app/Math.punk",
+        \\module Math exposing (add, double, Shape(..), Color)
+        \\
+        \\add : I64 -> I64 -> I64
+        \\add = fn a, b -> a + b
+        \\
+        \\double = fn x -> x * 2
+        \\
+        \\secret = fn x -> x
+        \\
+        \\type Shape = Circle F64 | Square F64
+        \\
+        \\type Color = Red | Green
     },
-    .{ "app/Text.roc",
-    \\Text := [].{
-    \\    ## Repeat a string.
-    \\    repeat : Str, U64 -> Str
-    \\    repeat = |s, n| s
-    \\
-    \\    pad_left = |s, n, c| s
-    \\
-    \\    shout : Str -> Str
-    \\    shout = |s|
-    \\        x : Str
-    \\        x = s
-    \\        x
-    \\
-    \\    greeting : Str
-    \\    greeting = "hi"
-    \\}
+    .{
+        "app/Text.roc",
+        \\Text := [].{
+        \\    ## Repeat a string.
+        \\    repeat : Str, U64 -> Str
+        \\    repeat = |s, n| s
+        \\
+        \\    pad_left = |s, n, c| s
+        \\
+        \\    shout : Str -> Str
+        \\    shout = |s|
+        \\        x : Str
+        \\        x = s
+        \\        x
+        \\
+        \\    greeting : Str
+        \\    greeting = "hi"
+        \\}
     },
-    .{ "cache/AbC123/Wrap.roc",
-    \\Wrap := [].{
-    \\    surround : Str, Str, Str -> Str
-    \\    surround = |s, l, r| s
-    \\}
+    .{
+        "cache/AbC123/Wrap.roc",
+        \\Wrap := [].{
+        \\    surround : Str, Str, Str -> Str
+        \\    surround = |s, l, r| s
+        \\}
     },
-    .{ "app/../pf/Stdout.roc",
-    \\Stdout := [].{
-    \\    line! : Str => {}
-    \\    write_both! : Str, Str => {}
-    \\}
+    .{
+        "app/../pf/Stdout.roc",
+        \\Stdout := [].{
+        \\    line! : Str => {}
+        \\    write_both! : Str, Str => {}
+        \\}
     },
 } };
 
 fn checkWith(src: []const u8, expected: []const u8) (punk.Error || error{TestExpectedEqual})!void {
-    const reader = mod.Reader{ .ctx = @constCast(@ptrCast(&files)), .read = Files.read };
+    const reader = mod.Reader{ .ctx = @ptrCast(@constCast(&files)), .read = Files.read };
     const out = try mod.toRocWith(std.testing.allocator, "app/main.punk", src, reader);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings(expected, out);
@@ -590,7 +594,7 @@ fn checkWithError(src: []const u8, line: u32, msg_part: []const u8) error{ TestE
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
-    const resolver = punk.Resolver{ .ctx = @constCast(@ptrCast(&files)), .load = testLoad };
+    const resolver = punk.Resolver{ .ctx = @ptrCast(@constCast(&files)), .load = testLoad };
     if (punk.translateWith(arena.allocator(), src, &diag, resolver)) |out| {
         std.debug.print("expected an error, got:\n{s}\n", .{out});
         return error.TestUnexpectedResult;
@@ -671,7 +675,7 @@ test "modules: modules of URL packages are read where the package is" {
         \\wrap = Wrap.surround "(" ")"
         \\
     ;
-    const reader = mod.Reader{ .ctx = @constCast(@ptrCast(&files)), .read = Files.read, .packageDir = testPackageDir };
+    const reader = mod.Reader{ .ctx = @ptrCast(@constCast(&files)), .read = Files.read, .packageDir = testPackageDir };
     const out = try mod.toRocWith(std.testing.allocator, "app/main.punk", src, reader);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings(
