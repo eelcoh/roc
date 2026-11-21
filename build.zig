@@ -2935,6 +2935,15 @@ pub fn build(b: *std.Build) void {
     fixture_options.addOption([]const u8, "build_root", b.root.joinString(b.allocator, "") catch @panic("OOM"));
     roc_modules.addAll(roc_exe);
     const roc_install_step = install_and_run(b, no_bin, roc_exe, strip_macho_exports_tool, build_roc_step, run_roc_step, run_args);
+    // punkroc: `zig-out/bin/punk` is `roc` under another name, so `punk fmt`
+    // and `punk check --json` read as the roadmap writes them.
+    if (roc_install_step) |install_step| if (builtin.os.tag != .windows) {
+        const punk_link = b.addSystemCommand(&.{ "ln", "-sf", "roc" });
+        punk_link.addDirectoryArg(.{ .relative = .{ .base = .install_prefix, .sub_path = "bin/punk" } });
+        punk_link.has_side_effects = true;
+        punk_link.step.dependOn(install_step);
+        build_roc_step.dependOn(&punk_link.step);
+    };
 
     const run_builtin_format = b.addRunArtifact(roc_exe);
     run_builtin_format.addArgs(&.{ "fmt", "--check", "src/build/roc/Builtin.roc" });

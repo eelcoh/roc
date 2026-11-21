@@ -12,6 +12,9 @@ pub const Diagnostic = translate_mod.Diagnostic;
 pub const Error = translate_mod.Error;
 pub const translate = translate_mod.translate;
 
+/// `punk fmt`: lays out punkroc source in its one canonical form.
+pub const format = @import("format.zig");
+
 /// The file extension of punkroc source files.
 pub const extension = ".punk";
 

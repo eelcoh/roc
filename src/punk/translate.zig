@@ -203,6 +203,9 @@ pub const Token = struct {
     tag: Tag,
     text: []const u8,
     start: u32,
+    /// Where the token ends in the source (after a multi-line string's
+    /// closing quotes); `src[start..end]` is the token as written.
+    end: u32,
     line: u32,
     col: u32,
     first_on_line: bool,
@@ -561,6 +564,7 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
             .tag = tag,
             .text = made_text orelse src[text_start..text_end],
             .start = @intCast(tok_start),
+            .end = @intCast(text_end),
             .line = line,
             .col = col,
             .first_on_line = first_on_line,

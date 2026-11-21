@@ -1125,3 +1125,143 @@ test "numbers: dividing by zero gives 0, as in Elm" {
         \\
     );
 }
+
+// punk fmt (format.zig)
+
+const format = @import("format.zig");
+
+fn checkFormat(src: []const u8, expected: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    const out = format.format(arena.allocator(), src, &diag) catch |err| {
+        std.debug.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.col, diag.message });
+        return err;
+    };
+    try std.testing.expectEqualStrings(expected, out);
+    // Formatting is idempotent.
+    const again = try format.format(arena.allocator(), out, &diag);
+    try std.testing.expectEqualStrings(out, again);
+}
+
+test "fmt: indentation, spaces and blank lines" {
+    try checkFormat(
+        \\app [main!] { pf: platform "../platform/main.roc" }
+        \\import pf.Stdout
+        \\import pf.Stdin
+        \\
+        \\
+        \\
+        \\-- Sum of things
+        \\total : List I64 -> I64
+        \\
+        \\total = fn xs ->
+        \\  fold x in xs into acc = 0
+        \\      acc+x    -- add it
+        \\main! = fn () ->
+        \\      xs = [1,2 , 3]
+        \\      r = {a=1,b= -2}
+        \\      ys = xs |> List.map (fn x->x*2)   |>   List.keepIf (fn x -> x>2)
+        \\      names = List.map .a [r]
+        \\      case List.first ys of
+        \\          Ok v ->   Stdout.line! "${I64.toStr (v + total xs + r.b)}"
+        \\          Err _ -> Stdout.line! "none"   
+    ,
+        \\app [main!] { pf: platform "../platform/main.roc" }
+        \\
+        \\import pf.Stdout
+        \\import pf.Stdin
+        \\
+        \\-- Sum of things
+        \\total : List I64 -> I64
+        \\total = fn xs ->
+        \\    fold x in xs into acc = 0
+        \\        acc + x -- add it
+        \\
+        \\main! = fn () ->
+        \\    xs = [1, 2, 3]
+        \\    r = { a = 1, b = -2 }
+        \\    ys = xs |> List.map (fn x -> x * 2) |> List.keepIf (fn x -> x > 2)
+        \\    names = List.map .a [r]
+        \\    case List.first ys of
+        \\        Ok v -> Stdout.line! "${I64.toStr (v + total xs + r.b)}"
+        \\        Err _ -> Stdout.line! "none"
+        \\
+    );
+}
+
+test "fmt: types, tuples, leading commas, multi-line strings" {
+    try checkFormat(
+        \\module Shapes exposing (Shape(..), area, lst, neg)
+        \\
+        \\type Shape = Circle F64|Rect F64 F64
+        \\
+        \\{-| The area. -}
+        \\area : Shape -> F64
+        \\area = fn shape ->
+        \\   case shape of
+        \\      Circle r ->
+        \\         3.14 * r * r
+        \\      Rect w h -> w*h
+        \\
+        \\lst : List I64
+        \\lst =
+        \\    [ 1
+        \\    ,2
+        \\    , -3
+        \\    ]
+        \\
+        \\neg : ( I64, I64 ) -> I64
+        \\neg = fn ( x, y ) -> -x
+        \\
+        \\example : Str
+        \\example =
+        \\  """
+        \\  ab
+        \\    cd
+        \\  """
+    ,
+        \\module Shapes exposing (Shape(..), area, lst, neg)
+        \\
+        \\type Shape = Circle F64 | Rect F64 F64
+        \\
+        \\{-| The area. -}
+        \\area : Shape -> F64
+        \\area = fn shape ->
+        \\    case shape of
+        \\        Circle r ->
+        \\            3.14 * r * r
+        \\        Rect w h -> w * h
+        \\
+        \\lst : List I64
+        \\lst =
+        \\    [ 1
+        \\    , 2
+        \\    , -3
+        \\    ]
+        \\
+        \\neg : (I64, I64) -> I64
+        \\neg = fn (x, y) -> -x
+        \\
+        \\example : Str
+        \\example =
+        \\    """
+        \\    ab
+        \\      cd
+        \\    """
+        \\
+    );
+}
+
+test "fmt: a syntax error leaves the file alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    try std.testing.expectError(error.ParseError, format.format(arena.allocator(), "x = (1 +\n", &diag));
+}
+
+test "fmt: same-ignoring-space" {
+    try std.testing.expect(format.sameIgnoringSpace("a  b\n c", "a b c"));
+    try std.testing.expect(!format.sameIgnoringSpace("ab", "a b"));
+    try std.testing.expect(!format.sameIgnoringSpace("a", "a b"));
+}

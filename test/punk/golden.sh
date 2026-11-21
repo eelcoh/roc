@@ -8,7 +8,8 @@
 #     sh test/punk/golden.sh --update   write the expected output anew
 #
 # It fails as well when a program in examples/punk/ has no case, so that a
-# new example cannot be forgotten.
+# new example cannot be forgotten, when a .punk file there is not laid out
+# as `punk fmt` would, and when src/punk/llms.txt is out of date.
 set -u
 
 root=$(pwd)
@@ -80,6 +81,26 @@ for f in $(cd examples/punk && grep -l '^app' $(find . -name '*.punk') | sed 's|
         failed=$((failed + 1))
     fi
 done
+
+# Every .punk file in examples/punk/ is formatted as `punk fmt` lays it out.
+unformatted=$("$roc" fmt --check $(find examples/punk -name '*.punk' | sort) 2>&1)
+if [ $? -ne 0 ]; then
+    echo "FAIL punk fmt --check:"
+    echo "$unformatted" | sed 's/^/     /'
+    failed=$((failed + 1))
+else
+    echo "ok   punk fmt --check"
+    passed=$((passed + 1))
+fi
+
+# src/punk/llms.txt is generated from the source; it must be up to date.
+if python3 src/punk/gen_llms.py --check; then
+    echo "ok   llms.txt up to date"
+    passed=$((passed + 1))
+else
+    echo "FAIL llms.txt: run python3 src/punk/gen_llms.py"
+    failed=$((failed + 1))
+fi
 
 [ "$update" = yes ] && exit 0
 echo

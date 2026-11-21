@@ -97,4 +97,5 @@ def main(path):
             print(f'    .{{ "{mod}.{name}", Fn{{ .arity = {n}, .order = .{order}{extra} }} }},')
 
 
-main(sys.argv[1])
+if __name__ == "__main__":
+    main(sys.argv[1])

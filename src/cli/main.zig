@@ -94,6 +94,7 @@ const parse = @import("parse");
 const tracy = @import("tracy");
 const ctx_mod = @import("ctx");
 const punk = @import("punk");
+const punk_json = @import("punk_json.zig");
 const compile = @import("compile");
 const can = @import("can");
 const check = @import("check");
@@ -18837,6 +18838,12 @@ fn rocFormat(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
 
     const stdout = ctx.io.stdout();
     const stderr = ctx.io.stderr();
+    // punkroc: `.punk` files have their own formatter.
+    if (!args.stdin and args.paths.len > 0) {
+        var all_punk = true;
+        for (args.paths) |path| all_punk = all_punk and punk.isPunkPath(path);
+        if (all_punk) return rocFormatPunk(ctx, args);
+    }
     // Formatting a file brings its `roc` version pin up to date when this
     // compiler is a newer nightly than the one it names.
     var builtin_facts = fmt.BuiltinFacts{ .allocator = ctx.gpa };
@@ -18907,6 +18914,55 @@ fn rocFormat(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
     if (had_errors) {
         return error.FormattingFailed;
     }
+}
+
+/// `roc fmt` (or `punk fmt`) on `.punk` files: lays each out in punkroc's
+/// canonical form (src/punk/format.zig). With `--check` it only lists the
+/// files that are not formatted.
+fn rocFormatPunk(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
+    const stdout = ctx.io.stdout();
+    const stderr = ctx.io.stderr();
+    var failed: usize = 0;
+    var unformatted: usize = 0;
+    var changed: usize = 0;
+    for (args.paths) |path| {
+        var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const src = std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, path, arena, .limited(256 * 1024 * 1024)) catch |err| {
+            try stderr.print("{s}: cannot read: {s}\n", .{ path, @errorName(err) });
+            failed += 1;
+            continue;
+        };
+        var diag: punk.Diagnostic = .{};
+        const out = punk.format.format(arena, src, &diag) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ParseError, error.Unsafe => {
+                try stderr.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
+                failed += 1;
+                continue;
+            },
+        };
+        if (std.mem.eql(u8, out, src)) continue;
+        if (args.check) {
+            try stdout.print("{s}\n", .{path});
+            unformatted += 1;
+        } else {
+            std.Io.Dir.cwd().writeFile(ctx.io.std_io, .{ .sub_path = path, .data = out }) catch |err| {
+                try stderr.print("{s}: cannot write: {s}\n", .{ path, @errorName(err) });
+                failed += 1;
+                continue;
+            };
+            changed += 1;
+        }
+    }
+    if (args.check and unformatted > 0) {
+        try stdout.print("{d} file(s) are not formatted; run `punk fmt` on them.\n", .{unformatted});
+    } else if (!args.check) {
+        try stdout.print("Formatted {d} file(s), {d} changed.\n", .{ args.paths.len - failed, changed });
+    }
+    ctx.io.flush();
+    if (failed > 0 or unformatted > 0) return error.FormattingFailed;
 }
 
 /// Create a progress reporter for a CLI operation. The breakdown is drawn to
@@ -20924,6 +20980,14 @@ fn finishRocCheck(
 ) RocCheckError!void {
     const elapsed = @as(u64, @intCast(std.Io.Timestamp.now(ctx.io.std_io, .awake).nanoseconds - timer_start_ns));
     const stderr_report_config = ctx.reportConfig(.stderr);
+
+    if (args.json) {
+        const display_path = try ctx.displayPath(args.path);
+        try punk_json.write(ctx.arena, stdout, display_path, check_result.reports, check_result.error_count, check_result.warning_count, ctx.reportConfig(.stdout));
+        ctx.io.flush();
+        if (check_result.error_count > 0) return error.CheckFailed;
+        return;
+    }
 
     for (check_result.reports) |module| {
         for (module.reports) |*report| {

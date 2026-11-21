@@ -6,6 +6,7 @@
 //!
 //! | Code | Rule |
 //! |------|------|
+//! | P001 | any other punkroc syntax error (given by `punk check --json`, src/cli/punk_json.zig) |
 //! | P101 | `crash` only inside an `expect` test |
 //! | P102 | `dbg` only inside an `expect` test |
 //! | P201 | what a module exposes has a type annotation |
