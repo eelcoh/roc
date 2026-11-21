@@ -26,6 +26,7 @@ currying                currying.punk
 elm                     elm.punk
 fold                    fold.punk
 imports/app             imports/app.punk
+numbers                 numbers.punk
 platform/io-stdin       platform/io.punk            lines.txt
 platform/io-file        platform/io.punk            -           lines.txt
 platform/io-missing     platform/io.punk            -           does-not-exist.txt

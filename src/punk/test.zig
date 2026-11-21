@@ -417,7 +417,11 @@ test "operators" {
         \\d = first.concat(second)
         \\e = f(-1)
         \\g = x - 1
-        \\h = List.from_iter(Iter.keep_if(1..=(n // 2), |d| n % d == 0))
+        \\h = List.from_iter(Iter.keep_if(1..=punk_int_div(n, 2), |d| punk_int_rem(n, d) == 0))
+        \\
+        \\punk_int_div = |a, b| if b == 0 { 0 } else { a // b }
+        \\
+        \\punk_int_rem = |a, b| if b == 0 { 0 } else { a % b }
         \\
     );
 }
@@ -477,6 +481,7 @@ test "module whose type has the module's name" {
         \\    = Circle F64
         \\    | Rect F64 F64
         \\
+        \\area : Shape -> F64
         \\area = fn shape ->
         \\    case shape of
         \\        Circle r -> 3.0 * r * r
@@ -494,6 +499,7 @@ test "module whose type has the module's name" {
         \\        Rect(punk_a1, punk_a2) => punk_a2.to_hash(punk_a1.to_hash(Hasher.write_u64(punk_h, 1)))
         \\    }
         \\
+        \\    area : Shape -> F64
         \\    area = |shape| match shape {
         \\        Circle(r) => 3.0 * r * r
         \\        Rect(w, h) => w * h
@@ -1039,6 +1045,83 @@ test "Elm names: the file's own definitions win" {
         \\
         \\x : Order
         \\x = compare(1, 2)
+        \\
+    );
+}
+
+fn checkRule(src: []const u8, line: u32, col: u32, rule: punk.Rule) error{ TestExpectedEqual, TestUnexpectedResult }!void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    if (punk.translate(arena.allocator(), src, &diag)) |out| {
+        std.debug.print("expected an error, got:\n{s}\n", .{out});
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expectEqual(line, diag.line);
+    try std.testing.expectEqual(col, diag.col);
+    try std.testing.expectEqualStrings(rule.code(), diag.code);
+    if (!std.mem.startsWith(u8, diag.message, rule.code())) {
+        std.debug.print("message was: {s}\n", .{diag.message});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "rules: crash and dbg only inside tests" {
+    try checkRule("f = fn x ->\n    crash \"no\"\n", 2, 5, .crash_outside_test);
+    try checkRule("f = fn x ->\n    y = dbg x\n    y\n", 2, 9, .dbg_outside_test);
+    try checkRule("f = fn x ->\n    case x of\n        Ok v -> v\n        Err _ -> crash \"no\"\n", 4, 18, .crash_outside_test);
+    try checkError("f = fn x -> dbg x\n", 1, "'dbg' is only allowed inside an 'expect' test");
+    // Inside an `expect`, at the top level or in a body, they are fine.
+    try check("expect\n    dbg (1 + 1) == 2\n", "expect dbg (1 + 1) == 2\n");
+    try check(
+        \\f = fn x ->
+        \\    expect x == dbg x
+        \\    x
+    ,
+        \\f = |x| {
+        \\    expect x == (dbg x)
+        \\    x
+        \\}
+        \\
+    );
+}
+
+test "rules: what a module exposes has a type annotation" {
+    try checkRule("module M exposing (double)\n\ndouble = fn x -> x * 2\n", 3, 1, .exposed_without_annotation);
+    try checkError("module M exposing (..)\n\nf : I64 -> I64\nf = fn x -> x\n\ng = fn x -> x\n", 6, "'g' is exposed, so it needs a type annotation");
+    // Not exposed, or in an app: no annotation needed.
+    try check("module M exposing (f)\n\nf : I64 -> I64\nf = fn x -> helper x\n\nhelper = fn x -> x\n",
+        \\M := [].{
+        \\    f : I64 -> I64
+        \\    f = |x| helper(x)
+        \\
+        \\    helper = |x| x
+        \\}
+        \\
+    );
+    try check("double = fn x -> x * 2\n", "double = |x| x * 2\n");
+}
+
+test "numbers: dividing by zero gives 0, as in Elm" {
+    try check("a = x // y\n",
+        \\a = punk_int_div(x, y)
+        \\
+        \\punk_int_div = |a, b| if b == 0 { 0 } else { a // b }
+        \\
+    );
+    try check("a = (x + 1) % 2 == 0\n",
+        \\a = punk_int_rem(x + 1, 2) == 0
+        \\
+        \\punk_int_rem = |a, b| if b == 0 { 0 } else { a % b }
+        \\
+    );
+    try check("a = modBy 3 x\nb = List.map (remainderBy 2) xs\n",
+        \\a = punk_mod_by(3, x)
+        \\b = List.map(xs, |punk_a1| punk_remainder_by(2, punk_a1))
+        \\
+        \\punk_mod_by = |n, x| if n == 0 { 0 } else { if x % n != 0 and (x % n < 0) != (n < 0) { x % n + n } else { x % n } }
+        \\
+        \\punk_remainder_by = |n, x| if n == 0 { 0 } else { x % n }
         \\
     );
 }

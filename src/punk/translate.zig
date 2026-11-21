@@ -22,6 +22,8 @@ const std = @import("std");
 const stdlib = @import("stdlib.zig");
 const interface = @import("interface.zig");
 const elm = @import("elm.zig");
+const numbers = @import("numbers.zig");
+const rules = @import("rules.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Interface = interface.Interface;
@@ -56,7 +58,12 @@ pub const Diagnostic = struct {
     line: u32 = 0,
     col: u32 = 0,
     message: []const u8 = "",
+    /// The code of the design rule that was broken (`P101`, see rules.zig),
+    /// or empty for a syntax error.
+    code: []const u8 = "",
 };
+
+pub const Rule = rules.Rule;
 
 /// Errors from translating punkroc source.
 pub const Error = error{ ParseError, OutOfMemory };
@@ -239,6 +246,14 @@ const single_ops = "+-*/<>%^!&";
 
 fn isIdentChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+/// A broken design rule (rules.zig): the message starts with the rule's code.
+fn failRule(a: Allocator, diag: *Diagnostic, line: u32, col: u32, rule: Rule, message: []const u8) Error {
+    const msg = try std.fmt.allocPrint(a, "{s}: {s}", .{ rule.code(), message });
+    const err = fail(diag, line, col, msg);
+    diag.code = rule.code();
+    return err;
 }
 
 fn fail(diag: *Diagnostic, line: u32, col: u32, message: []const u8) error{ParseError} {
@@ -683,6 +698,9 @@ const Parser = struct {
     /// The token that starts the current statement, item or case branch is
     /// never a stop, even though it sits at the stop column.
     stmt_start: usize = std.math.maxInt(usize),
+    /// How many `expect` tests the parser is inside; `crash` and `dbg` are
+    /// only allowed there (rules P101, P102).
+    test_depth: u32 = 0,
 
     fn tok(p: *Parser) Token {
         return p.toks[p.pos];
@@ -785,7 +803,7 @@ const Parser = struct {
             .kw_type => return p.parseTypeDecl(),
             .kw_expect => {
                 _ = p.advance();
-                return .{ .expect = try p.parseBody() };
+                return .{ .expect = try p.parseTest() };
             },
             .lower => if (p.peekAt(1).tag == .colon) {
                 _ = p.advance();
@@ -821,6 +839,13 @@ const Parser = struct {
     }
 
     // blocks
+
+    /// The body of an `expect` test.
+    fn parseTest(p: *Parser) Error!*Block {
+        p.test_depth += 1;
+        defer p.test_depth -= 1;
+        return p.parseBody();
+    }
 
     /// After `=`, `->`, `then`, `else`, `in`: either an indented block on the
     /// following lines, or an expression on the same line.
@@ -879,7 +904,7 @@ const Parser = struct {
             .kw_var, .kw_for, .kw_while => return p.errAt(t, "punkroc has no '{s}': use 'fold x in xs into total = 0' or a recursive function", .{t.text}),
             .kw_expect => {
                 _ = p.advance();
-                return .{ .expect = try p.parseBody() };
+                return .{ .expect = try p.parseTest() };
             },
             .lower => if (p.peekAt(1).tag == .colon and !p.peekAt(1).first_on_line) {
                 _ = p.advance();
@@ -990,6 +1015,12 @@ const Parser = struct {
             .kw_fold => return p.parseFold(),
             .kw_return => return p.errAt(t, "punkroc has no 'return': the last line of a body is its value", .{}),
             .kw_crash, .kw_dbg => {
+                if (p.test_depth == 0) {
+                    if (t.tag == .kw_crash) return failRule(p.a, p.diag, t.line, t.col, .crash_outside_test, "'crash' is only allowed inside an 'expect' test. " ++
+                        "A program must not stop halfway: return a Result (or Maybe) and let the caller decide what to do with the error.");
+                    return failRule(p.a, p.diag, t.line, t.col, .dbg_outside_test, "'dbg' is only allowed inside an 'expect' test. " ++
+                        "Remove it when you are done debugging, or move what you are checking into an 'expect'.");
+                }
                 _ = p.advance();
                 return p.new(Expr, .{ .kw = .{ .kw = t.text, .arg = try p.parseExpr() } });
             },
@@ -1847,7 +1878,11 @@ const Emitter = struct {
         };
         try e.loadImports(items);
         try e.bindItems(items);
-        if (moduleHeaderName(items) != null) e.own_alias = (try e.interfaceOf(items)).own_alias;
+        if (moduleHeaderName(items) != null) {
+            const iface = try e.interfaceOf(items);
+            e.own_alias = iface.own_alias;
+            try e.checkExposedAnnotated(items, iface);
+        }
         const module_name = moduleHeaderName(items) orelse {
             try e.emitItems(items);
             try e.emitHelpers();
@@ -2469,6 +2504,34 @@ const Emitter = struct {
         return iface;
     }
 
+    /// Rule P201: every function and value a module exposes has a type
+    /// annotation, so its interface is written down and does not change by
+    /// accident when its body does.
+    fn checkExposedAnnotated(e: *Emitter, items: []const Item, iface: Interface) Error!void {
+        for (items) |item| switch (item.kind) {
+            .def => |d| if (d.pat.* == .ident) {
+                const raw = d.pat.ident;
+                if (!iface.exposesValue(try snake(e.a, raw))) continue;
+                if (hasAnno(items, raw)) continue;
+                const msg = try std.fmt.allocPrint(e.a, "'{s}' is exposed, so it needs a type annotation. Write '{s} : ...' on the line above its definition.", .{ raw, raw });
+                return e.errAtRule(raw, .exposed_without_annotation, msg);
+            },
+            .raw, .anno, .type_alias, .type_nominal, .expect => {},
+        };
+    }
+
+    fn hasAnno(items: []const Item, name: []const u8) bool {
+        for (items) |item| if (item.kind == .anno and std.mem.eql(u8, item.kind.anno.name, name)) return true;
+        return false;
+    }
+
+    /// Like `errAtText`, for a broken design rule (rules.zig).
+    fn errAtRule(e: *Emitter, text: []const u8, rule: Rule, message: []const u8) Error {
+        const err = e.errAtText(text, try std.fmt.allocPrint(e.a, "{s}: {s}", .{ rule.code(), message }));
+        e.diag.code = rule.code();
+        return err;
+    }
+
     /// A qualified name of a punkroc module that it does not expose is an
     /// error, as in Elm. Names of Roc modules are left to the Roc compiler.
     fn checkExposed(e: *Emitter, raw: []const u8) Error!void {
@@ -2814,7 +2877,9 @@ const Emitter = struct {
     fn isAtomic(x: *const Expr) bool {
         return switch (x.*) {
             .ident, .ident_raw, .upper, .literal, .string, .unit, .underscore, .field, .app, .list, .tuple, .paren, .record, .try_ => true,
-            .binop, .neg, .not, .lambda, .if_, .case, .kw => false,
+            // `a // b` is written as a call (numbers.zig).
+            .binop => |b| numbers.operator(b.op) != null,
+            .neg, .not, .lambda, .if_, .case, .kw => false,
         };
     }
 
@@ -2889,6 +2954,17 @@ const Emitter = struct {
             .app => |app| try e.emitCall(app.func, app.args),
             .binop => |b| {
                 const info = Parser.opInfo(b.op).?;
+                // `a // b` is `punk_int_div(a, b)` (see numbers.zig).
+                if (numbers.operator(b.op)) |h| {
+                    try e.useHelper(h, b.op);
+                    try e.wFrom(b.op, h.name);
+                    try e.w("(");
+                    try e.emitItem(b.lhs);
+                    try e.w(", ");
+                    try e.emitItem(b.rhs);
+                    try e.w(")");
+                    return;
+                }
                 if (std.mem.eql(u8, b.op, "++")) {
                     try e.emitAtomic(b.lhs);
                     try e.w(".concat(");
