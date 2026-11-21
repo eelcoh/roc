@@ -189,7 +189,6 @@ fn fail(diag: *Diagnostic, line: u32, col: u32, message: []const u8) error{Parse
     return error.ParseError;
 }
 
-/// Split punkroc source into tokens, keeping layout information.
 /// The text between the quotes of a multi-line string (`"""..."""`) as one
 /// ordinary string literal, quotes included. When the string starts on the
 /// line after the opening quotes and the closing quotes stand on a line of
@@ -241,6 +240,7 @@ fn multilineString(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
     return out.items;
 }
 
+/// Split punkroc source into tokens, keeping layout information.
 pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
     var toks: std.ArrayList(Token) = .empty;
     var comments: std.ArrayList([]const u8) = .empty;
