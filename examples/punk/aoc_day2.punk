@@ -42,7 +42,7 @@ solve = fn input, findInvalid ->
 
         allInvalid = allInvalid ++ dedup rangeInvalid
 
-    Ok (List.fold (fn acc, n -> acc + n) 0 allInvalid)
+    Ok (List.fold (fn n, acc -> acc + n) 0 allInvalid)
 
 -- Ideally we use a Set, but it's not available yet.
 dedup = fn list ->

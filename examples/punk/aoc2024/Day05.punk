@@ -1,0 +1,111 @@
+app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
+
+import pf.Stdout
+
+{-| Advent of Code 2024, day 5: Print Queue. -}
+
+example =
+    """
+    47|53
+    97|13
+    97|61
+    97|47
+    75|29
+    61|13
+    75|53
+    29|13
+    97|29
+    53|29
+    61|53
+    97|53
+    61|29
+    47|13
+    75|47
+    97|75
+    47|61
+    75|61
+    47|29
+    75|13
+    53|13
+
+    75,47,61,53,29
+    97,61,53,29,13
+    75,29,13
+    75,97,47,61,53
+    61,13,29
+    97,13,75,29,47
+    """
+
+type alias Rules = Set (U64, U64)
+
+main! = fn () ->
+    case parse example of
+        Ok { rules, updates } ->
+            Stdout.line! "Part 1: ${U64.toStr (part1 rules updates)}"
+            Stdout.line! "Part 2: ${U64.toStr (part2 rules updates)}"
+        Err _ ->
+            Stdout.line! "could not parse the input"
+
+parse : Str -> Result { rules : Rules, updates : List (List U64) } _
+parse = fn input ->
+    case Str.splitOn "\n\n" input of
+        [rulesPart, updatesPart] ->
+            rules =
+                rulesPart
+                    |> Str.splitOn "\n"
+                    |> List.mapTry parseRule?
+                    |> Set.fromList
+            updates =
+                updatesPart
+                    |> Str.splitOn "\n"
+                    |> List.mapTry (fn line -> line |> Str.splitOn "," |> List.mapTry U64.fromStr)?
+            Ok { rules = rules, updates = updates }
+        _ ->
+            Err MissingBlankLine
+
+parseRule : Str -> Result (U64, U64) _
+parseRule = fn line ->
+    case Str.splitOn "|" line of
+        [before, after] -> Ok (U64.fromStr before?, U64.fromStr after?)
+        _ -> Err (BadRule line)
+
+compare : Rules -> U64 -> U64 -> (LT | EQ | GT)
+compare = fn rules, a, b ->
+    if Set.contains (a, b) rules then
+        LT
+    else if Set.contains (b, a) rules then
+        GT
+    else
+        EQ
+
+sortPages : Rules -> List U64 -> List U64
+sortPages = fn rules, pages ->
+    List.sortWith (fn a, b -> toOrder (compare rules a b)) pages
+
+-- Roc's sortWith wants Before | Same | After; Elm uses LT | EQ | GT
+toOrder = fn order ->
+    case order of
+        LT -> Before
+        EQ -> Same
+        GT -> After
+
+middle : List U64 -> U64
+middle = fn pages ->
+    pages
+        |> List.get (List.len pages // 2)
+        |> Result.withDefault 0
+
+part1 : Rules -> List (List U64) -> U64
+part1 = fn rules, updates ->
+    updates
+        |> List.keepIf (fn pages -> sortPages rules pages == pages)
+        |> List.map middle
+        |> List.sum
+
+part2 : Rules -> List (List U64) -> U64
+part2 = fn rules, updates ->
+    updates
+        |> List.map (fn pages -> (pages, sortPages rules pages))
+        |> List.keepIf (fn (pages, sorted) -> pages != sorted)
+        |> List.map (fn (_, sorted) -> middle sorted)
+        |> List.sum
