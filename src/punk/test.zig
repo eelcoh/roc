@@ -565,6 +565,12 @@ const files = Files{ .entries = &.{
     \\    greeting = "hi"
     \\}
     },
+    .{ "cache/AbC123/Wrap.roc",
+    \\Wrap := [].{
+    \\    surround : Str, Str, Str -> Str
+    \\    surround = |s, l, r| s
+    \\}
+    },
     .{ "app/../pf/Stdout.roc",
     \\Stdout := [].{
     \\    line! : Str => {}
@@ -648,6 +654,55 @@ test "modules: Roc modules take their arguments in Roc's order" {
         \\}
         \\
     );
+}
+
+/// Where the test's URL packages are; the compiler downloads them.
+fn testPackageDir(_: ?*anyopaque, _: std.mem.Allocator, url: []const u8) ?[]const u8 {
+    return if (std.mem.endsWith(u8, url, "/AbC123.tar.zst")) "cache/AbC123" else null;
+}
+
+test "modules: modules of URL packages are read where the package is" {
+    const src =
+        \\app [main!] { pf: platform "../pf/main.roc", w: "https://example.com/AbC123.tar.zst" }
+        \\
+        \\import w.Wrap
+        \\
+        \\quoted = "hi" |> Wrap.surround "<" ">"
+        \\wrap = Wrap.surround "(" ")"
+        \\
+    ;
+    const reader = mod.Reader{ .ctx = @constCast(@ptrCast(&files)), .read = Files.read, .packageDir = testPackageDir };
+    const out = try mod.toRocWith(std.testing.allocator, "app/main.punk", src, reader);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings(
+        \\app [main!] { pf: platform "../pf/main.roc", w: "https://example.com/AbC123.tar.zst" }
+        \\
+        \\import w.Wrap
+        \\
+        \\quoted = Wrap.surround("hi", "<", ">")
+        \\wrap = |punk_a1| Wrap.surround(punk_a1, "(", ")")
+        \\
+    , out);
+    // Without a way to find the package, its functions keep Roc's order.
+    try checkWith(src,
+        \\app [main!] { pf: platform "../pf/main.roc", w: "https://example.com/AbC123.tar.zst" }
+        \\
+        \\import w.Wrap
+        \\
+        \\quoted = Wrap.surround("<", ">", "hi")
+        \\wrap = Wrap.surround("(", ")")
+        \\
+    );
+}
+
+test "syntax errors are kept for the compiler to report" {
+    try std.testing.expectError(error.ParseError, mod.toRoc(std.testing.allocator, "bad.punk", "x = (1 +\n"));
+    const msg = (try mod.syntaxError(std.testing.allocator, "bad.punk")).?;
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.startsWith(u8, msg, "bad.punk:2:1: "));
+    const out = try mod.toRoc(std.testing.allocator, "bad.punk", "x = 1\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(null, try mod.syntaxError(std.testing.allocator, "bad.punk"));
 }
 
 test "modules: names an import exposes unqualified" {
