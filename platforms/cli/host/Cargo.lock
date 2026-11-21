@@ -249,7 +249,12 @@ dependencies = [
  "ambit-caps-dir-native",
  "ambit-cli",
  "ambit-cli-native",
+ "punk-roc-abi",
 ]
+
+[[package]]
+name = "punk-roc-abi"
+version = "0.1.0"
 
 [[package]]
 name = "quote"

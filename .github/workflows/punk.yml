@@ -52,10 +52,14 @@ jobs:
         run: |
           set -eu
           zig test src/punk/test.zig
+          (cd platforms/roc-abi && cargo test --locked)
           (cd platforms/cli/host && cargo test --locked)
+          (cd platforms/server/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
+          # The server app: ambit's spec against the punk shortener.
+          (cd examples/punk/shortener/server && cargo test --locked)
 
   upstream:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -103,10 +107,14 @@ jobs:
         run: |
           set -eu
           zig test src/punk/test.zig
+          (cd platforms/roc-abi && cargo test --locked)
           (cd platforms/cli/host && cargo test --locked)
+          (cd platforms/server/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
+          # The server app: ambit's spec against the punk shortener.
+          (cd examples/punk/shortener/server && cargo test --locked)
       - name: Push the branch and open a PR
         if: steps.merge.outputs.nothing != 'yes'
         run: |

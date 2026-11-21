@@ -1,0 +1,336 @@
+module Value exposing (Value(..), parse, encode)
+
+{-| A JSON value, as Elm's `Json.Value`. You rarely look inside one: read it
+with the decoders of `Decode`, and make one with the functions of `Encode`.
+
+A number keeps the text it was written with, so that a large integer or a
+precise fraction comes out exactly as it went in.
+-}
+type Value
+    = JNull
+    | JBool Bool
+    | JNumber Str
+    | JString Str
+    | JArray (List Value)
+    | JObject (List (Str, Value))
+
+-- Parsing -------------------------------------------------------------------
+
+{-| Reads JSON text. The error says what was wrong and at which byte. -}
+parse : Str -> Result Value Str
+parse = fn text ->
+    bytes = Str.toUtf8 text
+    (value, end) = try parseValue bytes (skipSpace bytes 0)
+    rest = skipSpace bytes end
+    if rest == List.len bytes then
+        Ok value
+    else
+        Err (unexpected bytes rest)
+
+-- The byte at `i`, or 0 past the end. A 0 byte is never valid JSON outside a
+-- string, and inside one it is a control character, which is an error too.
+at : List U8 -> U64 -> U8
+at = fn bytes, i ->
+    case List.get i bytes of
+        Ok b -> b
+        Err _ -> 0
+
+unexpected : List U8 -> U64 -> Str
+unexpected = fn bytes, i ->
+    if i >= List.len bytes then
+        "unexpected end of JSON"
+    else
+        "unexpected character at byte ${U64.toStr i}"
+
+skipSpace : List U8 -> U64 -> U64
+skipSpace = fn bytes, i ->
+    b = at bytes i
+    if b == ' ' || b == '\n' || b == '\r' || b == '\t' then
+        skipSpace bytes (i + 1)
+    else
+        i
+
+parseValue : List U8 -> U64 -> Result (Value, U64) Str
+parseValue = fn bytes, i ->
+    b = at bytes i
+    if b == '{' then
+        parseObject bytes (skipSpace bytes (i + 1)) []
+    else if b == '[' then
+        parseArray bytes (skipSpace bytes (i + 1)) []
+    else if b == '"' then
+        (text, end) = try parseString bytes (i + 1) []
+        Ok (JString text, end)
+    else if b == '-' || isDigit b then
+        parseNumber bytes i
+    else if startsWith bytes i "true" then
+        Ok (JBool True, i + 4)
+    else if startsWith bytes i "false" then
+        Ok (JBool False, i + 5)
+    else if startsWith bytes i "null" then
+        Ok (JNull, i + 4)
+    else
+        Err (unexpected bytes i)
+
+startsWith : List U8 -> U64 -> Str -> Bool
+startsWith = fn bytes, i, word ->
+    want = Str.toUtf8 word
+    List.sublist { start = i, len = List.len want } bytes == want
+
+-- `i` is just after the `[` (and any space), or after a `,`.
+parseArray : List U8 -> U64 -> List Value -> Result (Value, U64) Str
+parseArray = fn bytes, i, items ->
+    if List.isEmpty items && at bytes i == ']' then
+        Ok (JArray [], i + 1)
+    else
+        (item, end) = try parseValue bytes (skipSpace bytes i)
+        next = skipSpace bytes end
+        more = List.append item items
+        b = at bytes next
+        if b == ',' then
+            parseArray bytes (skipSpace bytes (next + 1)) more
+        else if b == ']' then
+            Ok (JArray more, next + 1)
+        else
+            Err (unexpected bytes next)
+
+-- `i` is just after the `{` (and any space), or after a `,`.
+parseObject : List U8 -> U64 -> List (Str, Value) -> Result (Value, U64) Str
+parseObject = fn bytes, i, fields ->
+    if List.isEmpty fields && at bytes i == '}' then
+        Ok (JObject [], i + 1)
+    else if at bytes i /= '"' then
+        Err (unexpected bytes i)
+    else
+        (key, afterKey) = try parseString bytes (i + 1) []
+        colon = skipSpace bytes afterKey
+        if at bytes colon /= ':' then
+            Err (unexpected bytes colon)
+        else
+            (value, end) = try parseValue bytes (skipSpace bytes (colon + 1))
+            next = skipSpace bytes end
+            more = List.append (key, value) fields
+            b = at bytes next
+            if b == ',' then
+                parseObject bytes (skipSpace bytes (next + 1)) more
+            else if b == '}' then
+                Ok (JObject more, next + 1)
+            else
+                Err (unexpected bytes next)
+
+-- `i` is just after the opening quote; `acc` holds the bytes so far.
+parseString : List U8 -> U64 -> List U8 -> Result (Str, U64) Str
+parseString = fn bytes, i, acc ->
+    b = at bytes i
+    if b == '"' then
+        case Str.fromUtf8 acc of
+            Ok text -> Ok (text, i + 1)
+            Err _ -> Err "a string that is not UTF-8 at byte ${U64.toStr i}"
+    else if b == '\\' then
+        (code, next) = try parseEscape bytes (i + 1)
+        parseString bytes next (acc ++ utf8 code)
+    else if b < 0x20 then
+        if i >= List.len bytes then
+            Err "a string without its closing quote"
+        else
+            Err "a control character in a string at byte ${U64.toStr i}"
+    else
+        parseString bytes (i + 1) (List.append b acc)
+
+-- `i` is just after the backslash. Gives the character and where the string goes on.
+parseEscape : List U8 -> U64 -> Result (U32, U64) Str
+parseEscape = fn bytes, i ->
+    b = at bytes i
+    if b == 'u' then
+        first = try hex4 bytes (i + 1)
+        if first >= 0xD800 && first <= 0xDBFF then
+            -- A surrogate pair: `😀` is one character.
+            if at bytes (i + 5) == '\\' && at bytes (i + 6) == 'u' then
+                second = try hex4 bytes (i + 7)
+                if second >= 0xDC00 && second <= 0xDFFF then
+                    Ok (0x10000 + (first - 0xD800) * 0x400 + (second - 0xDC00), i + 11)
+                else
+                    Err "a broken surrogate pair at byte ${U64.toStr i}"
+            else
+                Err "a broken surrogate pair at byte ${U64.toStr i}"
+        else if first >= 0xDC00 && first <= 0xDFFF then
+            Err "a broken surrogate pair at byte ${U64.toStr i}"
+        else
+            Ok (first, i + 5)
+    else
+        case simpleEscape b of
+            Just c -> Ok (c, i + 1)
+            Nothing -> Err "an unknown escape at byte ${U64.toStr i}"
+
+simpleEscape : U8 -> Maybe U32
+simpleEscape = fn b ->
+    if b == '"' then
+        Just 0x22
+    else if b == '\\' then
+        Just 0x5C
+    else if b == '/' then
+        Just 0x2F
+    else if b == 'b' then
+        Just 0x08
+    else if b == 'f' then
+        Just 0x0C
+    else if b == 'n' then
+        Just 0x0A
+    else if b == 'r' then
+        Just 0x0D
+    else if b == 't' then
+        Just 0x09
+    else
+        Nothing
+
+hex4 : List U8 -> U64 -> Result U32 Str
+hex4 = fn bytes, i ->
+    digitsAt = [hexDigit (at bytes i), hexDigit (at bytes (i + 1)), hexDigit (at bytes (i + 2)), hexDigit (at bytes (i + 3))]
+    case digitsAt of
+        [Just a, Just b, Just c, Just d] -> Ok (((a * 16 + b) * 16 + c) * 16 + d)
+        _ -> Err "a bad \\u escape at byte ${U64.toStr i}"
+
+hexDigit : U8 -> Maybe U32
+hexDigit = fn b ->
+    if b >= '0' && b <= '9' then
+        Just (U8.toU32 (b - '0'))
+    else if b >= 'a' && b <= 'f' then
+        Just (U8.toU32 (b - 'a') + 10)
+    else if b >= 'A' && b <= 'F' then
+        Just (U8.toU32 (b - 'A') + 10)
+    else
+        Nothing
+
+-- The UTF-8 bytes of one character.
+utf8 : U32 -> List U8
+utf8 = fn c ->
+    if c < 0x80 then
+        [U32.toU8Wrap c]
+    else if c < 0x800 then
+        [U32.toU8Wrap (0xC0 + c // 0x40), cont c]
+    else if c < 0x10000 then
+        [U32.toU8Wrap (0xE0 + c // 0x1000), cont (c // 0x40), cont c]
+    else
+        [U32.toU8Wrap (0xF0 + c // 0x40000), cont (c // 0x1000), cont (c // 0x40), cont c]
+
+cont : U32 -> U8
+cont = fn c ->
+    U32.toU8Wrap (0x80 + c % 0x40)
+
+isDigit : U8 -> Bool
+isDigit = fn b ->
+    b >= '0' && b <= '9'
+
+-- JSON's number grammar: `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`
+parseNumber : List U8 -> U64 -> Result (Value, U64) Str
+parseNumber = fn bytes, start ->
+    afterSign = if at bytes start == '-' then start + 1 else start
+    afterInt =
+        if at bytes afterSign == '0' then
+            afterSign + 1
+        else
+            digits bytes afterSign
+    if afterInt == afterSign then
+        Err (unexpected bytes afterSign)
+    else
+        afterFrac =
+            if at bytes afterInt == '.' then
+                digits bytes (afterInt + 1)
+            else
+                afterInt
+        afterExp =
+            if at bytes afterFrac == 'e' || at bytes afterFrac == 'E' then
+                s = afterFrac + 1
+                digits bytes (if at bytes s == '+' || at bytes s == '-' then s + 1 else s)
+            else
+                afterFrac
+        if afterFrac == afterInt + 1 then
+            Err (unexpected bytes afterFrac)
+        else if afterExp /= afterFrac && not (isDigit (at bytes (afterExp - 1))) then
+            Err (unexpected bytes afterExp)
+        else
+            case Str.fromUtf8 (List.sublist { start = start, len = afterExp - start } bytes) of
+                Ok text -> Ok (JNumber text, afterExp)
+                Err _ -> Err (unexpected bytes start)
+
+-- Where the digits that start at `i` end.
+digits : List U8 -> U64 -> U64
+digits = fn bytes, i ->
+    if isDigit (at bytes i) then digits bytes (i + 1) else i
+
+-- Writing -------------------------------------------------------------------
+
+{-| JSON text for the value. With an indent of 0 it is on one line; with 4,
+each item of an array or object is on a line of its own, indented by 4 spaces
+per level (Elm's `Json.Encode.encode`).
+-}
+encode : Int -> Value -> Str
+encode = fn indent, value ->
+    write indent 0 value
+
+write : Int -> Int -> Value -> Str
+write = fn indent, depth, value ->
+    case value of
+        JNull -> "null"
+        JBool True -> "true"
+        JBool False -> "false"
+        JNumber text -> text
+        JString text -> quote text
+        JArray [] -> "[]"
+        JArray items ->
+            items
+                |> List.map (write indent (depth + 1))
+                |> joinLines indent depth "[" "]"
+        JObject [] -> "{}"
+        JObject fields ->
+            colon = if indent > 0 then ": " else ":"
+            fields
+                |> List.map (fn (key, v) -> "${quote key}${colon}${write indent (depth + 1) v}")
+                |> joinLines indent depth "{" "}"
+
+joinLines : Int -> Int -> Str -> Str -> List Str -> Str
+joinLines = fn indent, depth, open, close, parts ->
+    if indent == 0 then
+        "${open}${Str.joinWith "," parts}${close}"
+    else
+        inner = spaces (indent * (depth + 1))
+        outer = spaces (indent * depth)
+        body =
+            parts
+                |> List.map (fn part -> "${inner}${part}")
+                |> Str.joinWith ",\n"
+        "${open}\n${body}\n${outer}${close}"
+
+spaces : Int -> Str
+spaces = fn n ->
+    Str.repeat (fromInt n) " "
+
+{-| The text in quotes, with `"`, `\` and control characters escaped. -}
+quote : Str -> Str
+quote = fn text ->
+    escaped =
+        Str.toUtf8 text
+            |> List.joinMap escapeByte
+    case Str.fromUtf8 escaped of
+        Ok inner -> "\"${inner}\""
+        Err _ -> "\"\""
+
+escapeByte : U8 -> List U8
+escapeByte = fn b ->
+    if b == '"' then
+        ['\\', '"']
+    else if b == '\\' then
+        ['\\', '\\']
+    else if b == '\n' then
+        ['\\', 'n']
+    else if b == '\r' then
+        ['\\', 'r']
+    else if b == '\t' then
+        ['\\', 't']
+    else if b < 0x20 then
+        ['\\', 'u', '0', '0', hexChar (b // 16), hexChar (b % 16)]
+    else
+        [b]
+
+hexChar : U8 -> U8
+hexChar = fn n ->
+    if n < 10 then '0' + n else 'a' + n - 10
