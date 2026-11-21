@@ -9,12 +9,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// Where and why translation failed.
 pub const Diagnostic = struct {
     line: u32 = 0,
     col: u32 = 0,
     message: []const u8 = "",
 };
 
+/// Errors from translating punkroc source.
 pub const Error = error{ ParseError, OutOfMemory };
 
 /// Translate a whole `.punk` module to Roc source text.
@@ -28,10 +30,9 @@ pub fn translate(arena: Allocator, src: []const u8, diag: *Diagnostic) Error![]c
     return e.buf.items;
 }
 
-// ---------------------------------------------------------------------------
 // Lexer
-// ---------------------------------------------------------------------------
 
+/// The kind of a punkroc token.
 pub const Tag = enum {
     lower, // foo, foo!, _foo
     upper, // Foo, Foo.Bar
@@ -78,6 +79,7 @@ pub const Tag = enum {
     eof,
 };
 
+/// One token, with its position and the comments before it.
 pub const Token = struct {
     tag: Tag,
     text: []const u8,
@@ -129,6 +131,7 @@ fn fail(diag: *Diagnostic, line: u32, col: u32, message: []const u8) error{Parse
     return error.ParseError;
 }
 
+/// Split punkroc source into tokens, keeping layout information.
 pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
     var toks: std.ArrayList(Token) = .empty;
     var comments: std.ArrayList([]const u8) = .empty;
@@ -342,7 +345,7 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
                         '|' => tag = .bar,
                         '?' => tag = .question,
                         '_' => tag = .underscore,
-                        else => if (std.mem.indexOfScalar(u8, single_ops, c) == null) {
+                        else => if (std.mem.findScalar(u8, single_ops, c) == null) {
                             return fail(diag, line, col, try std.fmt.allocPrint(a, "unexpected character '{c}'", .{c}));
                         },
                     }
@@ -374,10 +377,9 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
     return toks.items;
 }
 
-// ---------------------------------------------------------------------------
 // AST
-// ---------------------------------------------------------------------------
 
+/// A punkroc expression.
 pub const Expr = union(enum) {
     ident: []const u8, // lower or qualified lower (List.map)
     upper: []const u8, // tag or qualified tag
@@ -401,15 +403,19 @@ pub const Expr = union(enum) {
     kw: struct { kw: []const u8, arg: *Expr }, // return, crash, dbg
 };
 
+/// A record field in an expression; `value` is null for punning (`{ x }`).
 pub const Field = struct { name: []const u8, value: ?*Expr };
+/// One branch of a `case`.
 pub const Arm = struct { pats: []*Pattern, guard: ?*Expr, body: *Block };
 
+/// An indented body: statements followed by an optional result expression.
 pub const Block = struct {
     stmts: []Stmt,
     result: ?*Expr,
     result_blank_before: bool = false,
 };
 
+/// A statement inside a block.
 pub const Stmt = struct {
     comments: []const []const u8,
     blank_before: bool,
@@ -424,6 +430,7 @@ pub const Stmt = struct {
     },
 };
 
+/// A punkroc pattern.
 pub const Pattern = union(enum) {
     ident: []const u8,
     underscore: []const u8,
@@ -438,8 +445,10 @@ pub const Pattern = union(enum) {
     as_: struct { pat: *Pattern, name: []const u8 },
 };
 
+/// A record field in a pattern; `pat` is null for punning.
 pub const PField = struct { name: []const u8, pat: ?*Pattern };
 
+/// A punkroc type annotation.
 pub const Type = union(enum) {
     name: []const u8, // Upper, qualified, type variable or `_`
     app: struct { head: []const u8, args: []*Type },
@@ -451,8 +460,10 @@ pub const Type = union(enum) {
     paren: *Type,
 };
 
+/// A record field in a type.
 pub const TField = struct { name: []const u8, ty: *Type };
 
+/// A top-level item of a module.
 pub const Item = struct {
     comments: []const []const u8,
     blank_before: bool,
@@ -467,9 +478,7 @@ pub const Item = struct {
     trailing_comments: []const []const u8 = &.{},
 };
 
-// ---------------------------------------------------------------------------
 // Parser
-// ---------------------------------------------------------------------------
 
 const Parser = struct {
     a: Allocator,
@@ -546,7 +555,7 @@ const Parser = struct {
         return ptr;
     }
 
-    // ---- module ----
+    // module
 
     fn parseModule(p: *Parser) Error![]Item {
         var items: std.ArrayList(Item) = .empty;
@@ -595,7 +604,7 @@ const Parser = struct {
                 _ = p.advance();
                 return .{ .anno = .{ .name = t.text, .ty = try p.parseType() } };
             },
-            else => {},
+            .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_as, .eof => {},
         }
         const lhs = try p.parseExpr();
         _ = try p.expect(.equals, "'=' in a definition");
@@ -623,7 +632,7 @@ const Parser = struct {
         return .{ .type_nominal = .{ .name = name, .params = params.items, .alts = alts.items } };
     }
 
-    // ---- blocks ----
+    // blocks
 
     /// After `=`, `->`, `then`, `else`, `in`: either an indented block on the
     /// following lines, or an expression on the same line.
@@ -712,7 +721,7 @@ const Parser = struct {
                 _ = p.advance();
                 return .{ .anno = .{ .name = t.text, .ty = try p.parseType() } };
             },
-            else => {},
+            .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_in, .kw_return, .kw_crash, .kw_dbg, .kw_as, .kw_header, .eof => {},
         }
         const e = try p.parseExpr();
         if (p.at(.equals)) {
@@ -723,7 +732,7 @@ const Parser = struct {
         return .{ .expr = e };
     }
 
-    // ---- expressions ----
+    // expressions
 
     fn parseExpr(p: *Parser) Error!*Expr {
         return p.parseExprBp(0);
@@ -818,7 +827,7 @@ const Parser = struct {
                 _ = p.advance();
                 return p.new(Expr, .{ .not = try p.parseApplication() });
             },
-            else => {},
+            .lower, .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .question, .kw_then, .kw_else, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_expect, .kw_as, .kw_header, .eof => {},
         }
         return p.parseApplication();
     }
@@ -831,7 +840,7 @@ const Parser = struct {
             // `f -1` passes a negative number; `f - 1` subtracts.
             .op => std.mem.eql(u8, t.text, "-") and t.space_before and !p.peekAt(1).space_before and
                 (p.peekAt(1).tag == .int or p.peekAt(1).tag == .float or p.peekAt(1).tag == .lower),
-            else => false,
+            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
         };
     }
 
@@ -886,7 +895,7 @@ const Parser = struct {
             .lparen => try p.parseParenExpr(),
             .lbrack => try p.parseListExpr(),
             .lbrace => try p.parseRecordExpr(),
-            else => return p.errAt(t, "expected an expression but found '{s}'", .{describe(t)}),
+            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => return p.errAt(t, "expected an expression but found '{s}'", .{describe(t)}),
         };
         while (p.tok().tag == .dot_field) {
             const f = p.advance();
@@ -998,8 +1007,7 @@ const Parser = struct {
     /// `min_col` is the column of the first `if` in an `else if` chain, so
     /// that every `else` may line up with it.
     fn parseIfFrom(p: *Parser, min_col: u32) Error!*Expr {
-        const if_tok = p.advance();
-        _ = if_tok;
+        _ = p.advance(); // if
         const cond = try p.parseExpr();
         if (!p.atLoose(.kw_then, min_col)) return p.errAt(p.tok(), "expected 'then' but found '{s}'", .{describe(p.tok())});
         _ = p.advance();
@@ -1061,7 +1069,7 @@ const Parser = struct {
         return p.new(Expr, .{ .case = .{ .subject = subject, .arms = arms.items } });
     }
 
-    // ---- patterns ----
+    // patterns
 
     fn parsePattern(p: *Parser) Error!*Pattern {
         var pat = try p.parsePatternApp();
@@ -1079,7 +1087,7 @@ const Parser = struct {
             var args: std.ArrayList(*Pattern) = .empty;
             while (!p.atStop() and switch (p.tok().tag) {
                 .lower, .upper, .int, .float, .string, .char, .lparen, .lbrack, .lbrace, .underscore => true,
-                else => false,
+                .qlower, .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
             }) try args.append(p.a, try p.parsePatternAtom());
             return p.new(Pattern, .{ .tag = .{ .name = name, .args = args.items } });
         }
@@ -1177,7 +1185,7 @@ const Parser = struct {
                 _ = try p.expect(.rbrace, "'}' or ','");
                 return p.new(Pattern, .{ .record = fields.items });
             },
-            else => {},
+            .qlower, .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => {},
         }
         return p.errAt(t, "expected a pattern but found '{s}'", .{describe(t)});
     }
@@ -1186,7 +1194,7 @@ const Parser = struct {
     /// expression and convert it.
     fn exprToPattern(p: *Parser, e: *Expr, at_tok: Token) Error!*Pattern {
         return switch (e.*) {
-            .ident => |name| if (std.mem.indexOfScalar(u8, name, '.') != null)
+            .ident => |name| if (std.mem.findScalar(u8, name, '.') != null)
                 p.errAt(at_tok, "cannot define a qualified name", .{})
             else if (name[0] == '_')
                 p.new(Pattern, .{ .underscore = name })
@@ -1218,11 +1226,11 @@ const Parser = struct {
                 });
                 break :blk p.new(Pattern, .{ .record = fields.items });
             },
-            else => p.errAt(at_tok, "the left side of '=' must be a name or a pattern", .{}),
+            .field, .binop, .neg, .not, .try_, .lambda, .if_, .case, .kw => p.errAt(at_tok, "the left side of '=' must be a name or a pattern", .{}),
         };
     }
 
-    // ---- types ----
+    // types
 
     fn parseType(p: *Parser) Error!*Type {
         var items: std.ArrayList(*Type) = .empty;
@@ -1256,7 +1264,7 @@ const Parser = struct {
         if (p.atStop()) return false;
         return switch (p.tok().tag) {
             .lower, .upper, .lparen, .lbrace, .underscore => true,
-            else => false,
+            .qlower, .int, .float, .string, .char, .rparen, .lbrack, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
         };
     }
 
@@ -1344,15 +1352,13 @@ const Parser = struct {
                 _ = try p.expect(.rbrace, "'}' or ','");
                 return p.new(Type, .{ .record = .{ .fields = fields.items, .ext = ext } });
             },
-            else => {},
+            .qlower, .int, .float, .string, .char, .rparen, .lbrack, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => {},
         }
         return p.errAt(t, "expected a type but found '{s}'", .{describe(t)});
     }
 };
 
-// ---------------------------------------------------------------------------
 // Emitter
-// ---------------------------------------------------------------------------
 
 /// camelCase -> snake_case for lower identifiers. `toUTF8` -> `to_utf8`,
 /// `keepIf!` -> `keep_if!`. Already snake_case names are unchanged.
@@ -1380,7 +1386,7 @@ pub fn snake(a: Allocator, name: []const u8) Allocator.Error![]const u8 {
 
 /// Qualified lower names: only the last segment is converted (List.keepIf -> List.keep_if).
 fn snakeQualified(a: Allocator, name: []const u8) Allocator.Error![]const u8 {
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return snake(a, name);
+    const dot = std.mem.findScalarLast(u8, name, '.') orelse return snake(a, name);
     return std.fmt.allocPrint(a, "{s}{s}", .{ name[0 .. dot + 1], try snake(a, name[dot + 1 ..]) });
 }
 
@@ -1408,11 +1414,73 @@ const Emitter = struct {
         }
     }
 
+    /// A module file starts with an Elm-style header, `module Name exposing (..)`.
+    /// Roc wants a type module instead: `Name := [].{ ... }` with the
+    /// definitions inside the block. When the module declares `type Name`,
+    /// that type carries the block.
     fn emitModule(e: *Emitter, items: []Item) Error!void {
+        const module_name = moduleHeaderName(items) orelse {
+            try e.emitItems(items);
+            try e.w("\n");
+            return;
+        };
+
+        // The header and imports stay at the top level; the rest goes in the block.
+        var top: std.ArrayList(Item) = .empty;
+        var inner: std.ArrayList(Item) = .empty;
+        var own_type: ?Item = null;
+        for (items[1..]) |item| {
+            switch (item.kind) {
+                .raw => |r| if (std.mem.startsWith(u8, r, "import")) {
+                    try top.append(e.a, item);
+                    continue;
+                },
+                .type_nominal => |tn| if (own_type == null and std.mem.eql(u8, tn.name, module_name)) {
+                    own_type = item;
+                    continue;
+                },
+                .anno, .def, .type_alias, .expect => {},
+            }
+            try inner.append(e.a, item);
+        }
+
+        // The header's own comments (e.g. a module doc comment) go first.
+        try e.comments(items[0].comments);
+        try e.emitItems(top.items);
+        if (top.items.len > 0) try e.w("\n\n");
+        if (own_type) |t| {
+            try e.comments(t.comments);
+            try e.emitItems(&.{.{ .comments = &.{}, .blank_before = false, .kind = t.kind }});
+        } else {
+            try e.w(module_name);
+            try e.w(" := []");
+        }
+        try e.w(".{");
+        e.indent += 1;
+        try e.nl();
+        try e.emitItems(inner.items);
+        e.indent -= 1;
+        try e.w("\n}\n");
+    }
+
+    fn moduleHeaderName(items: []Item) ?[]const u8 {
+        if (items.len == 0) return null;
+        const raw = switch (items[0].kind) {
+            .raw => |r| r,
+            .anno, .def, .type_alias, .type_nominal, .expect => return null,
+        };
+        if (!std.mem.startsWith(u8, raw, "module ")) return null;
+        const rest = std.mem.trimStart(u8, raw["module ".len..], " ");
+        const end = std.mem.findAny(u8, rest, " \n") orelse rest.len;
+        if (end == 0 or !std.ascii.isUpper(rest[0])) return null;
+        return rest[0..end];
+    }
+
+    fn emitItems(e: *Emitter, items: []const Item) Error!void {
         for (items, 0..) |item, i| {
             if (i > 0) {
-                try e.w("\n");
                 if (item.blank_before) try e.w("\n");
+                try e.nl();
             }
             try e.comments(item.comments);
             switch (item.kind) {
@@ -1447,11 +1515,10 @@ const Emitter = struct {
                 },
             }
             for (item.trailing_comments) |c| {
-                try e.w("\n");
+                try e.nl();
                 try e.w(c);
             }
         }
-        try e.w("\n");
     }
 
     fn emitTypeHead(e: *Emitter, name: []const u8, params: [][]const u8) Error!void {
@@ -1465,7 +1532,7 @@ const Emitter = struct {
         try e.w(")");
     }
 
-    // ---- blocks ----
+    // blocks
 
     /// A body that is only an expression is written inline; otherwise as a
     /// `{ ... }` block.
@@ -1548,7 +1615,7 @@ const Emitter = struct {
         }
     }
 
-    // ---- expressions ----
+    // expressions
 
     fn isVar(e: *Emitter, name: []const u8) bool {
         var i = e.vars.items.len;
@@ -1568,7 +1635,7 @@ const Emitter = struct {
     fn isAtomic(x: *const Expr) bool {
         return switch (x.*) {
             .ident, .upper, .literal, .string, .unit, .underscore, .field, .app, .list, .tuple, .paren, .record, .try_ => true,
-            else => false,
+            .binop, .neg, .not, .lambda, .if_, .case, .kw => false,
         };
     }
 
@@ -1593,7 +1660,7 @@ const Emitter = struct {
                 break :blk info.prec < parent_prec or (info.prec == parent_prec and right_side);
             },
             .lambda, .if_, .case, .kw => true,
-            else => false,
+            .ident, .upper, .literal, .string, .unit, .underscore, .field, .app, .neg, .not, .try_, .list, .tuple, .paren, .record => false,
         };
         if (needs) try e.w("(");
         try e.emitExpr(child);
@@ -1796,7 +1863,7 @@ const Emitter = struct {
         return Parser.describe(t);
     }
 
-    // ---- patterns ----
+    // patterns
 
     fn emitPattern(e: *Emitter, pat: *Pattern) Error!void {
         switch (pat.*) {
@@ -1851,7 +1918,7 @@ const Emitter = struct {
         }
     }
 
-    // ---- types ----
+    // types
 
     fn emitType(e: *Emitter, t: *Type, in_args: bool) Error!void {
         switch (t.*) {

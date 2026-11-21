@@ -7644,7 +7644,7 @@ pub const Coordinator = struct {
     }
 
     /// Resolve a module name to a path using a specific allocator
-    fn resolveModulePathWithAllocator(_: *Coordinator, root_dir: []const u8, mod_name: []const u8, alloc: Allocator) Allocator.Error![]const u8 {
+    fn resolveModulePathWithAllocator(self: *Coordinator, root_dir: []const u8, mod_name: []const u8, alloc: Allocator) Allocator.Error![]const u8 {
         // The relative path is a temporary of the join, so it starts on the stack.
         var rel_buffer: [256]u8 = undefined;
         var rel_state = std.heap.BufferFirstAllocator.init(&rel_buffer, alloc);
@@ -7660,7 +7660,13 @@ pub const Coordinator = struct {
         }
         try rel.appendSlice(rel_alloc, ".roc");
 
-        return try std.fs.path.join(alloc, &.{ root_dir, rel.items });
+        const roc_path = try std.fs.path.join(alloc, &.{ root_dir, rel.items });
+        // punkroc: `import Foo` also finds `Foo.punk`.
+        if (try self.roc_ctx.preferPunkSibling(alloc, roc_path)) |punk_path| {
+            alloc.free(roc_path);
+            return punk_path;
+        }
+        return roc_path;
     }
 
     /// Execute a parse task (pure function)

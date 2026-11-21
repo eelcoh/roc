@@ -1,7 +1,9 @@
+//! Translation tests for punkroc: punkroc source in, expected Roc source out.
+
 const std = @import("std");
 const punk = @import("translate.zig");
 
-fn check(src: []const u8, expected: []const u8) !void {
+fn check(src: []const u8, expected: []const u8) (punk.Error || error{TestExpectedEqual})!void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
@@ -12,7 +14,7 @@ fn check(src: []const u8, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, out);
 }
 
-fn checkError(src: []const u8, line: u32, msg_part: []const u8) !void {
+fn checkError(src: []const u8, line: u32, msg_part: []const u8) error{ TestExpectedEqual, TestUnexpectedResult }!void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
@@ -21,7 +23,7 @@ fn checkError(src: []const u8, line: u32, msg_part: []const u8) !void {
         return error.TestUnexpectedResult;
     } else |_| {}
     try std.testing.expectEqual(line, diag.line);
-    if (std.mem.indexOf(u8, diag.message, msg_part) == null) {
+    if (std.mem.find(u8, diag.message, msg_part) == null) {
         std.debug.print("message was: {s}\n", .{diag.message});
         return error.TestUnexpectedResult;
     }
@@ -326,4 +328,53 @@ test "errors" {
     try checkError("f = fn x ->\n    case x of A -> 1\n", 2, "own lines");
     try checkError("r = { a: 1 }\n", 1, "use '='");
     try checkError("x =\n\tfoo\n", 2, "tabs");
+}
+
+test "module header becomes a type module" {
+    try check(
+        \\module Math exposing (double)
+        \\
+        \\import Helper
+        \\
+        \\{-| Twice the number. -}
+        \\double : I64 -> I64
+        \\double = fn x ->
+        \\    x * 2
+        \\
+        \\sumAll = fn xs -> List.sum xs
+    ,
+        \\import Helper
+        \\
+        \\Math := [].{
+        \\    ## Twice the number.
+        \\    double : I64 -> I64
+        \\    double = |x| x * 2
+        \\
+        \\    sum_all = |xs| List.sum(xs)
+        \\}
+        \\
+    );
+}
+
+test "module whose type has the module's name" {
+    try check(
+        \\module Shape exposing (Shape(..), area)
+        \\
+        \\type Shape
+        \\    = Circle F64
+        \\    | Rect F64 F64
+        \\
+        \\area = fn shape ->
+        \\    case shape of
+        \\        Circle r -> 3.0 * r * r
+        \\        Rect w h -> w * h
+    ,
+        \\Shape := [Circle(F64), Rect(F64, F64)].{
+        \\    area = |shape| match shape {
+        \\        Circle(r) => 3.0 * r * r
+        \\        Rect(w, h) => w * h
+        \\    }
+        \\}
+        \\
+    );
 }

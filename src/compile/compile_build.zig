@@ -2367,7 +2367,13 @@ pub const BuildEnv = struct {
 
     fn moduleToPath(self: *BuildEnv, pkg_name: []const u8, module_name: []const u8) (Allocator.Error || error{ InvalidPackageName, PathOutsideWorkspace })![]const u8 {
         if (self.packages.get(pkg_name)) |pkg| {
-            return try self.logicalModuleToPath(pkg.root_dir, module_name);
+            const roc_path = try self.logicalModuleToPath(pkg.root_dir, module_name);
+            // punkroc: `import Foo` also finds `Foo.punk`.
+            if (try self.filesystem.preferPunkSibling(self.gpa, roc_path)) |punk_path| {
+                self.gpa.free(roc_path);
+                return punk_path;
+            }
+            return roc_path;
         }
         return error.InvalidPackageName;
     }

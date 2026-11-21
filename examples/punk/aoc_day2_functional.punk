@@ -64,6 +64,7 @@ part1Divisors = fn digits ->
 properDivisors : U64 -> List U64
 properDivisors = fn n ->
     1..=(n // 2)
+        |> Range.iter
         |> Iter.keepIf (fn d -> n % d == 0)
         |> List.fromIter
 
@@ -82,6 +83,7 @@ repeating = fn len, digits, start, end ->
     shift = U64.pow 10 (digits - len)
 
     (start // shift)..=(end // shift)
+        |> Range.iter
         |> Iter.map (fn pattern -> pattern * multiplier)
         |> Iter.keepIf (fn n -> start <= n && n <= end)
         |> List.fromIter
