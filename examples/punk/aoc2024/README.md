@@ -9,6 +9,10 @@ zig build roc
 zig-out/bin/roc examples/punk/aoc2024/Day06.punk
 ```
 
+Day 1 runs on punkroc's own platform (`test/punk/`), which can read files:
+`zig-out/bin/roc examples/punk/aoc2024/Day01.punk input.txt` solves your own
+puzzle input (run `sh test/punk/setup.sh` once first).
+
 | Day | Answers (example) | Shows |
 |-----|-------------------|-------|
 | 1   | 11, 31            | tuples, `.0` accessors, `List.map2` |

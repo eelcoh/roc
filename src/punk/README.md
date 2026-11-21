@@ -268,6 +268,12 @@ of `List.indexedMap`); Roc's own keep `U64` (`List.len`). `toInt` turns a
 Roc's functions that may fail keep returning a `Result` (`List.first`,
 `Dict.get`); the Elm-only ones return a `Maybe` (`List.head`, `String.toInt`).
 
+## A platform of its own
+
+`test/punk/platform` is a small platform for punkroc programs: `Stdout`,
+`Stderr`, `Stdin.line!` and `Stdin.readAll!`, `File.read!` and
+`File.write!`, and `Arg.list!`. See `test/punk/README.md`.
+
 ## Smaller Elm habits
 
 - **Accessor functions.** `.name` on its own is `fn r -> r.name`:

@@ -1,0 +1,20 @@
+app [main!] { pf: platform "../../../test/punk/platform/main.roc" }
+
+import pf.Stdout
+import pf.Stdin
+import pf.File
+
+{-| Reads standard input line by line and writes it, numbered, to a file. -}
+
+main! = fn () ->
+    numbered = readLines! 1 []
+    case File.write! "numbered.txt" (String.join "\n" numbered) of
+        Ok {} -> Stdout.line! "wrote ${String.fromInt (List.length numbered)} lines to numbered.txt"
+        Err (FileErr msg) -> Stdout.line! msg
+
+readLines! = fn n, acc ->
+    line = Stdin.line! ()
+    if line == "" then
+        acc
+    else
+        readLines! (n + 1) (List.append "${String.fromInt n}: ${line}" acc)
