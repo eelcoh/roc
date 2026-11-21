@@ -69,8 +69,8 @@ parseRule = fn line ->
         [before, after] -> Ok (try U64.fromStr before, try U64.fromStr after)
         _ -> Err (BadRule line)
 
-compare : Rules -> U64 -> U64 -> (LT | EQ | GT)
-compare = fn rules, a, b ->
+order : Rules -> U64 -> U64 -> Order
+order = fn rules, a, b ->
     if Set.contains (a, b) rules then
         LT
     else if Set.contains (b, a) rules then
@@ -80,14 +80,7 @@ compare = fn rules, a, b ->
 
 sortPages : Rules -> List U64 -> List U64
 sortPages = fn rules, pages ->
-    List.sortWith (fn a, b -> toOrder (compare rules a b)) pages
-
--- Roc's sortWith wants Before | Same | After; Elm uses LT | EQ | GT
-toOrder = fn order ->
-    case order of
-        LT -> Before
-        EQ -> Same
-        GT -> After
+    List.sortWith (order rules) pages
 
 middle : List U64 -> U64
 middle = fn pages ->

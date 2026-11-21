@@ -21,6 +21,7 @@
 const std = @import("std");
 const stdlib = @import("stdlib.zig");
 const interface = @import("interface.zig");
+const elm = @import("elm.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Interface = interface.Interface;
@@ -1764,6 +1765,10 @@ const Emitter = struct {
     buf: std.ArrayList(u8) = .empty,
     /// The source map of `buf`; see `Mark`.
     marks: std.ArrayList(Mark) = .empty,
+    /// The types the file defines, which win over Elm's (`Int`, `Maybe`).
+    local_types: std.StringHashMapUnmanaged(void) = .empty,
+    /// The helpers for Elm names the file uses (`elm.zig`), in order of use.
+    helpers: std.ArrayList(struct { h: elm.Helper, at: []const u8 }) = .empty,
     indent: u32 = 0,
     /// Names in scope, innermost last, with the arity of the function they
     /// hold when the emitter knows it (null: not a known function).
@@ -1835,11 +1840,17 @@ const Emitter = struct {
     /// definitions inside the block. When the module declares `type Name`,
     /// that type carries the block.
     fn emitModule(e: *Emitter, items: []Item) Error!void {
+        for (items) |item| switch (item.kind) {
+            .type_alias => |t| try e.local_types.put(e.a, t.name, {}),
+            .type_nominal => |t| try e.local_types.put(e.a, t.name, {}),
+            else => {},
+        };
         try e.loadImports(items);
         try e.bindItems(items);
         if (moduleHeaderName(items) != null) e.own_alias = (try e.interfaceOf(items)).own_alias;
         const module_name = moduleHeaderName(items) orelse {
             try e.emitItems(items);
+            try e.emitHelpers();
             try e.w("\n");
             return;
         };
@@ -1885,6 +1896,7 @@ const Emitter = struct {
             try e.nl();
         };
         try e.emitItems(inner.items);
+        try e.emitHelpers();
         e.indent -= 1;
         try e.w("\n}\n");
     }
@@ -1898,6 +1910,7 @@ const Emitter = struct {
     /// module (`Grid` in `module Grid`) becomes `GridAlias`, because in Roc
     /// the module itself is the type `Grid`.
     fn rocTypeName(e: *Emitter, n: []const u8) Error![]const u8 {
+        if (!e.local_types.contains(n)) if (elm.typeName(n)) |roc| return roc;
         if (e.own_alias) |own| if (std.mem.eql(u8, n, own)) return std.fmt.allocPrint(e.a, "{s}Alias", .{n});
         if (e.exposed_aliases.get(n)) |roc| return roc;
         if (std.mem.findScalarLast(u8, n, '.')) |dot| {
@@ -2118,6 +2131,67 @@ const Emitter = struct {
     }
 
     // expressions
+
+    /// A name used as a value: an Elm name punkroc has a helper for
+    /// (`List.head`) becomes that helper, unless the file has its own.
+    fn emitValueIdent(e: *Emitter, raw: []const u8) Error!void {
+        if (try e.helperFor(raw)) |h| {
+            if (h.tmpl) |tmpl| {
+                // `|punk_t0| punk_t0.0`
+                try e.wFrom(raw, "(|");
+                var i: u8 = 0;
+                while (i < h.arity) : (i += 1) try e.buf.print(e.a, "{s}punk_t{d}", .{ if (i > 0) ", " else "", i });
+                try e.w("| ");
+                try e.emitTemplate(tmpl, &.{});
+                return e.w(")");
+            }
+            try e.useHelper(h, raw);
+            return e.wFrom(raw, h.name);
+        }
+        return e.emitIdent(raw);
+    }
+
+    /// A helper written in place: `$0.0` with the arguments, or with
+    /// `punk_t0`... when `args` is empty.
+    fn emitTemplate(e: *Emitter, tmpl: []const u8, args: []*Expr) Error!void {
+        var i: usize = 0;
+        while (i < tmpl.len) : (i += 1) {
+            if (tmpl[i] == '$' and i + 1 < tmpl.len and std.ascii.isDigit(tmpl[i + 1])) {
+                const k = tmpl[i + 1] - '0';
+                if (args.len > 0) try e.emitAtomic(args[k]) else try e.buf.print(e.a, "punk_t{d}", .{k});
+                i += 1;
+                continue;
+            }
+            try e.buf.append(e.a, tmpl[i]);
+        }
+    }
+
+    /// The helper for the Elm name `raw` (see `elm.zig`), when the name
+    /// means that and not something of the file or one of its imports.
+    fn helperFor(e: *Emitter, raw: []const u8) Error!?elm.Helper {
+        const name = try snakeQualified(e.a, raw);
+        if (std.mem.findScalarLast(u8, name, '.')) |dot| {
+            if (e.modules.get(name[0..dot]) != null) return null;
+        } else if (e.lookupBinding(name) != null) return null;
+        return elm.helper(name);
+    }
+
+    /// `at` is where the file first uses it: errors in the helper point there.
+    fn useHelper(e: *Emitter, h: elm.Helper, at: []const u8) Error!void {
+        for (e.helpers.items) |used| if (std.mem.eql(u8, used.h.name, h.name)) return;
+        try e.helpers.append(e.a, .{ .h = h, .at = at });
+        for (h.uses) |dep| if (elm.helperByName(dep)) |d| try e.useHelper(d, at);
+    }
+
+    /// The definitions of the helpers the file used, at the end of it.
+    fn emitHelpers(e: *Emitter) Error!void {
+        for (e.helpers.items) |used| {
+            try e.w("\n");
+            try e.nl();
+            if (e.inSrc(used.at)) try e.markAt(used.at, @intCast(used.h.def.len));
+            try e.buf.appendSlice(e.a, used.h.def);
+        }
+    }
 
     fn emitIdent(e: *Emitter, raw: []const u8) Error!void {
         try e.checkExposed(raw);
@@ -2498,6 +2572,7 @@ const Emitter = struct {
     fn calleeArity(e: *Emitter, x: *const Expr) Error!?Callee {
         switch (x.*) {
             .ident => |raw| {
+                if (try e.helperFor(raw)) |h| return .{ .f = .{ .arity = h.arity, .order = .none }, .builtin = false };
                 const name = stdlib.rocName(try snakeQualified(e.a, raw));
                 if (std.mem.findScalarLast(u8, name, '.')) |dot| {
                     if (e.modules.get(name[0..dot])) |iface| {
@@ -2574,6 +2649,11 @@ const Emitter = struct {
         const call = try e.flatCall(func_in, args_in);
         const func = call.func;
         const args = call.args;
+        const f_ident = if (func.* == .paren and func.paren.* == .ident) func.paren else func;
+        if (f_ident.* == .ident) if (try e.helperFor(f_ident.ident)) |h| if (h.tmpl) |tmpl| if (args.len == h.arity) {
+            try e.markAt(f_ident.ident, 0);
+            return e.emitTemplate(tmpl, args);
+        };
         const callee = try e.calleeArity(func) orelse {
             try e.emitCallee(func);
             return e.emitArgs(args, null);
@@ -2659,7 +2739,7 @@ const Emitter = struct {
 
     fn emitCallee(e: *Emitter, func: *Expr) Error!void {
         const f = if (func.* == .paren and func.paren.* == .ident) func.paren else func;
-        if (f.* == .ident) return e.emitIdent(f.ident);
+        if (f.* == .ident) return e.emitValueIdent(f.ident);
         if (f.* == .lambda or !isAtomic(f)) {
             try e.w("(");
             try e.emitExpr(f);
@@ -2791,7 +2871,7 @@ const Emitter = struct {
                         return e.w("()");
                     };
                 }
-                try e.emitIdent(name);
+                try e.emitValueIdent(name);
             },
             .upper => |s| {
                 try e.checkExposed(s);
@@ -3045,6 +3125,11 @@ const Emitter = struct {
         switch (t.*) {
             .name => |n| try e.wFrom(n, if (std.ascii.isLower(n[0])) try snake(e.a, n) else try e.rocTypeName(n)),
             .app => |app| {
+                if (!e.local_types.contains(app.head) and app.args.len == 1) if (elm.typeApp(app.head)) |parts| {
+                    try e.wFrom(app.head, parts[0]);
+                    try e.emitType(app.args[0], false);
+                    return e.w(parts[1]);
+                };
                 try e.w(if (std.mem.eql(u8, app.head, "Result")) "Try" else try e.rocTypeName(app.head));
                 try e.w("(");
                 for (app.args, 0..) |arg, i| {
