@@ -29,6 +29,11 @@ gpa: Allocator,
 /// Use for small and miscellaneous allocations that are never freed individually.
 arena: Allocator,
 
+/// punkroc: where packages given by URL are on disk, so the translator can
+/// read the modules a `.punk` app imports from them. The build sets this
+/// for the reads it makes; without it those modules are not read.
+punk_packages: ?punk.PackageFinder = null,
+
 /// A non-allocating question about one environment variable. Implementations
 /// answer while the environment value is valid; no borrowed pointer escapes.
 pub const EnvVarQuery = union(enum) {
@@ -197,15 +202,15 @@ fn defaultMapFilePrivate(_: ?*anyopaque, _: std.Io, _: []const u8) ?MappedFile {
 /// Read the entire contents of `path`. Caller owns returned slice.
 ///
 /// A punkroc file (`.punk`) is translated to Roc source here, so every reader
-/// of source files sees Roc. A punkroc syntax error is printed and reported as
-/// `error.IoError`.
+/// of source files sees Roc. A punkroc syntax error is reported as
+/// `error.IoError`; `punkSyntaxError` tells what it was.
 pub fn readFile(self: Self, path: []const u8, allocator: Allocator) ReadError![]u8 {
     const data = try self.vtable.readFile(self.ctx, self.std_io, path, allocator);
     if (!punk.isPunkPath(path)) return data;
     defer allocator.free(data);
     // The translator reads the modules a file imports for their interfaces.
     var self_copy = self;
-    const reader: punk.Reader = .{ .ctx = &self_copy, .read = readRawForPunk };
+    const reader: punk.Reader = .{ .ctx = &self_copy, .read = readRawForPunk, .packageDir = punkPackageDir };
     return punk.toRocWith(allocator, path, data, reader) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.ParseError => error.IoError,
@@ -217,6 +222,20 @@ fn readRawForPunk(ctx: ?*anyopaque, allocator: Allocator, path: []const u8) ?[]u
     const self: *const Self = @ptrCast(@alignCast(ctx.?));
     if (!self.fileExists(path)) return null;
     return self.vtable.readFile(self.ctx, self.std_io, path, allocator) catch null;
+}
+
+/// The syntax error that stopped the last translation of the punkroc file
+/// `path` (see `readFile`), as `path:line:col: message`. Null when there was
+/// none. Caller owns the returned slice.
+pub fn punkSyntaxError(allocator: Allocator, path: []const u8) Allocator.Error!?[]u8 {
+    return punk.syntaxError(allocator, path);
+}
+
+/// The directory of a URL package, for the punkroc translator.
+fn punkPackageDir(ctx: ?*anyopaque, allocator: Allocator, url: []const u8) ?[]const u8 {
+    const self: *const Self = @ptrCast(@alignCast(ctx.?));
+    const finder = self.punk_packages orelse return null;
+    return finder.dir(finder.ctx, allocator, url);
 }
 
 /// Read `path` into `buffer`. Returns bytes read.
