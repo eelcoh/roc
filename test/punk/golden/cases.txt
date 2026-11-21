@@ -20,6 +20,7 @@ aoc2024/Day04           aoc2024/Day04.punk
 aoc2024/Day05           aoc2024/Day05.punk
 aoc2024/Day06           aoc2024/Day06.punk
 aoc2024/Day07           aoc2024/Day07.punk
+aoc2024/Day10           aoc2024/Day10.punk
 aoc2024/Day11           aoc2024/Day11.punk
 aoc_day2_functional     aoc_day2_functional.punk
 currying                currying.punk

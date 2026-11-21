@@ -1,6 +1,6 @@
 # Advent of Code 2024 in punkroc
 
-Days 1 to 7 and 11, each on the example input from the puzzle text, in the
+Days 1 to 7, 10 and 11, each on the example input from the puzzle text, in the
 functional style (pipelines, recursion, no `var`). `Grid.punk` is a small
 punkroc module that days 4 and 6 share.
 
@@ -22,4 +22,5 @@ puzzle input (run `sh test/punk/setup.sh` once first).
 | 5   | 143, 123          | `Set`, `List.sortWith` with `Order` (`LT \| EQ \| GT`) |
 | 6   | 41, 6             | own union type with `==`, record update, loop detection |
 | 7   | 3749, 11387       | `type Op`, recursion with early stop |
+| 10  | 36, 81            | a grid as `Dict (Int, Int) Int`, recursion; written by an agent from `llms.txt` alone |
 | 11  | 55312, 65601038650482 | `Dict` of counts, `fold ... into ... with` |

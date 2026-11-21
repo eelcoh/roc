@@ -124,7 +124,28 @@ Builtin types: `Int` (64-bit, `I64`), `Float` (`F64`), `Bool` (`True`,
 Nothing`), `Result ok err` (`Ok ok | Err err`), `Order` (`LT | EQ | GT`), and
 Roc's sized numbers `U8 U16 U32 U64 I8 I16 I32 I64 F32 F64 Dec`.
 
-Your own types support `==` and can be `Dict` keys and `Set` members.
+Your own types, tuples, records, lists and strings support `==` and can be
+`Dict` keys and `Set` members: `Dict (Int, Int) Int` is the usual grid.
+
+### Numbers and characters
+
+A number literal gets its type from where it is used; give a top-level
+value an annotation (`total : U64`) when it matters. `Int` and `I64` are the
+same type, as are `Float` and `F64`. Convert between sized numbers with the
+functions of the source type:
+
+| From to | Function |
+|---------|----------|
+| `U64` to `Int`, `Int` to `U64` | `toInt n`, `fromInt n` |
+| always fits (`U8` to `I64`, `I32` to `I64`, ...) | `U8.toI64 b`, `I32.toI64 n` |
+| may not fit | `I64.toU8Try n` (a `Result`), or `I64.toU8Wrap n` (wraps around) |
+| to and from text | `I64.toStr n`, `U64.fromStr s` (a `Result`), `String.fromInt`, `String.toInt` (a `Maybe`) |
+
+A character literal `'a'` is a number (its code). `Str.toUtf8 s` gives the
+bytes of a string as `List U8`, and `'0'` compares with them, so the digit of
+a byte `b` is `U8.toI64 (b - '0')`.
+
+### Errors are tags
 
 Errors are tags; you do not have to declare an error type. A function that can
 fail returns `Result value _` and makes up the error tags it needs:
@@ -338,9 +359,18 @@ application.
 ### Read a file given on the command line, solve, print
 
 The shape of an Advent of Code solution: the example input in the file, the
-real input from a file argument.
+real input from a file argument. (The cookbook files live in
+`examples/punk/aoc2024/`, hence their longer platform path; some use the
+`test/fx/platform` test platform, which has `Stdout` too. Use
+`test/punk/platform` for your own programs.)
 
 @@example aoc2024/Day01.punk@@
+
+### A grid: `Dict (Int, Int) a`, neighbours, recursion
+
+Written by an agent that had only this file, on the first try.
+
+@@example aoc2024/Day10.punk@@
 
 ### Folds
 

@@ -125,7 +125,28 @@ Builtin types: `Int` (64-bit, `I64`), `Float` (`F64`), `Bool` (`True`,
 Nothing`), `Result ok err` (`Ok ok | Err err`), `Order` (`LT | EQ | GT`), and
 Roc's sized numbers `U8 U16 U32 U64 I8 I16 I32 I64 F32 F64 Dec`.
 
-Your own types support `==` and can be `Dict` keys and `Set` members.
+Your own types, tuples, records, lists and strings support `==` and can be
+`Dict` keys and `Set` members: `Dict (Int, Int) Int` is the usual grid.
+
+### Numbers and characters
+
+A number literal gets its type from where it is used; give a top-level
+value an annotation (`total : U64`) when it matters. `Int` and `I64` are the
+same type, as are `Float` and `F64`. Convert between sized numbers with the
+functions of the source type:
+
+| From to | Function |
+|---------|----------|
+| `U64` to `Int`, `Int` to `U64` | `toInt n`, `fromInt n` |
+| always fits (`U8` to `I64`, `I32` to `I64`, ...) | `U8.toI64 b`, `I32.toI64 n` |
+| may not fit | `I64.toU8Try n` (a `Result`), or `I64.toU8Wrap n` (wraps around) |
+| to and from text | `I64.toStr n`, `U64.fromStr s` (a `Result`), `String.fromInt`, `String.toInt` (a `Maybe`) |
+
+A character literal `'a'` is a number (its code). `Str.toUtf8 s` gives the
+bytes of a string as `List U8`, and `'0'` compares with them, so the digit of
+a byte `b` is `U8.toI64 (b - '0')`.
+
+### Errors are tags
 
 Errors are tags; you do not have to declare an error type. A function that can
 fail returns `Result value _` and makes up the error tags it needs:
@@ -499,7 +520,10 @@ remainderBy : Int -> Int -> Int
 ### Read a file given on the command line, solve, print
 
 The shape of an Advent of Code solution: the example input in the file, the
-real input from a file argument.
+real input from a file argument. (The cookbook files live in
+`examples/punk/aoc2024/`, hence their longer platform path; some use the
+`test/fx/platform` test platform, which has `Stdout` too. Use
+`test/punk/platform` for your own programs.)
 
 ```
 app [main!] { pf: platform "../../../test/punk/platform/main.roc" }
@@ -568,6 +592,99 @@ part2 : List U64 -> List U64 -> U64
 part2 = fn left, right ->
     left
         |> List.map (fn n -> n * List.countIf (fn m -> m == n) right)
+        |> List.sum
+```
+
+### A grid: `Dict (Int, Int) a`, neighbours, recursion
+
+Written by an agent that had only this file, on the first try.
+
+```
+app [main!] { pf: platform "../../../test/punk/platform/main.roc" }
+
+import pf.Stdout
+import pf.File
+import pf.Arg
+
+{-| Advent of Code 2024, day 10: Hoof It.
+
+Without arguments it solves the example; `roc Day10.punk input.txt` solves
+your own puzzle input.
+-}
+
+example =
+    """
+    89010123
+    78121874
+    87430965
+    96549874
+    45678903
+    32019012
+    01329801
+    10456732
+    """
+
+main! = fn () ->
+    case Arg.list! () of
+        [path] ->
+            case File.read! path of
+                Ok input -> solve! (String.trim input)
+                Err (FileErr msg) -> Stdout.line! msg
+        _ ->
+            solve! example
+
+solve! = fn input ->
+    grid = parse input
+    heads = trailheads grid
+    Stdout.line! "Part 1: ${String.fromInt (part1 grid heads)}"
+    Stdout.line! "Part 2: ${String.fromInt (part2 grid heads)}"
+
+parse : Str -> Dict (Int, Int) Int
+parse = fn input ->
+    input
+        |> String.lines
+        |> List.indexedMap (fn r, line -> parseRow r (String.trim line))
+        |> List.join
+        |> Dict.fromList
+
+parseRow : Int -> Str -> List ((Int, Int), Int)
+parseRow = fn r, line ->
+    line
+        |> Str.toUtf8
+        |> List.indexedMap (fn c, b -> ((r, c), U8.toI64 b - 48))
+
+trailheads : Dict (Int, Int) Int -> List (Int, Int)
+trailheads = fn grid ->
+    grid
+        |> Dict.toList
+        |> List.filter (fn (_, h) -> h == 0)
+        |> List.map .0
+
+heightAt : (Int, Int) -> Dict (Int, Int) Int -> Int
+heightAt = fn pos, grid ->
+    case Dict.get pos grid of
+        Ok h -> h
+        Err _ -> -1
+
+ends : Dict (Int, Int) Int -> Int -> (Int, Int) -> List (Int, Int)
+ends = fn grid, h, (r, c) ->
+    if h == 9 then
+        [(r, c)]
+    else
+        [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
+            |> List.filter (fn p -> heightAt p grid == h + 1)
+            |> List.concatMap (ends grid (h + 1))
+
+part1 : Dict (Int, Int) Int -> List (Int, Int) -> Int
+part1 = fn grid, heads ->
+    heads
+        |> List.map (fn p -> toInt (Set.len (Set.fromList (ends grid 0 p))))
+        |> List.sum
+
+part2 : Dict (Int, Int) Int -> List (Int, Int) -> Int
+part2 = fn grid, heads ->
+    heads
+        |> List.map (fn p -> List.length (ends grid 0 p))
         |> List.sum
 ```
 
