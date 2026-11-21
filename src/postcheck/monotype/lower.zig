@@ -2316,6 +2316,11 @@ const SpecEvidenceTarget = struct {
     callable_contracts: []const SpecEvidence = &.{},
 };
 
+/// The local-method target edges of stored evidence that materialized
+/// without a declaration context; the body restoring the stored function
+/// resolves them (`BodyContext.resolveStoredLocalEdges`).
+const StoredLocalEdges = std.ArrayList(*SpecEvidenceTarget);
+
 /// Whether materialized evidence selects a local procedure, as a target or
 /// anywhere in a target's nested evidence and callable contracts.
 fn specEvidenceSelectsLocalProc(entry: SpecEvidence) bool {
@@ -6325,7 +6330,6 @@ const Builder = struct {
     nominal_parameter_value_masks: std.AutoHashMapUnmanaged(NominalDeclarationKey, ?[]const bool) = .empty,
     coordinator_interface_summaries: ?*const SharedSummaries = null,
     coordinator_interface_summary_end: usize = 0,
-    interface_summary_checks: u32 = 0,
     spec_store: specialize.SpecBuilder,
     lowered_templates: collections.DenseMap(Ast.FnId, LoweredTemplate),
     /// `monoTypeMentionsFunction`'s answers, indexed by program type id. A
@@ -7905,28 +7909,7 @@ const Builder = struct {
         const completions = try self.allocator.alloc(base.post_check_task_executor.Completion, task_count);
         defer self.allocator.free(completions);
         const snapshot = try self.captureSpecJobInputs();
-        const inputs = SpecJobWorkerInputs{
-            .lanes = try self.specJobLanes(),
-            .modules = self.modules,
-            .module_views = self.moduleViews(),
-            .literal_argument_roots = &self.literal_argument_roots,
-            .source_file_ids = self.sourceFileIds(),
-            .lowering_module_ids = self.loweringModuleIds(),
-            .snapshot = &snapshot,
-            .interface_summaries = &self.shared_summaries.?,
-            .interface_summary_end = self.shared_summaries.?.count,
-            .replay_interface_summaries = self.replay_interface_summaries,
-            .collect_counters = self.counters != null,
-            .collect_diagnostics = self.diagnostics != null,
-            .inline_expects = self.inline_expects,
-            .comptime_value_reads = self.comptime_value_reads,
-            .literal_roots = self.literal_roots,
-            .declared_comptime_roots = self.borrowed_comptime_roots orelse &self.declared_comptime_roots,
-            .hosted_catalog = self.hosted_catalog,
-            .current_loc = self.current_loc,
-            .current_region = self.current_region,
-            .timing_std_io = if (self.timing) |timing| timing.std_io else null,
-        };
+        const inputs = try self.specJobWorkerInputs(&snapshot);
         var task_id: usize = 0;
         for (requests, 0..) |request, index| {
             if (!self.rootLowersTemplate(request)) continue;
@@ -8090,6 +8073,33 @@ const Builder = struct {
         return self.worker_inputs.capture(self.allocator, self.program);
     }
 
+    /// The run's inputs for a worker task that reads `snapshot`, which
+    /// `captureSpecJobInputs` captured for it.
+    fn specJobWorkerInputs(self: *Builder, snapshot: *const WorkerInputs.Snapshot) Allocator.Error!SpecJobWorkerInputs {
+        return .{
+            .lanes = try self.specJobLanes(),
+            .modules = self.modules,
+            .module_views = self.moduleViews(),
+            .literal_argument_roots = &self.literal_argument_roots,
+            .source_file_ids = self.sourceFileIds(),
+            .lowering_module_ids = self.loweringModuleIds(),
+            .snapshot = snapshot,
+            .interface_summaries = &self.shared_summaries.?,
+            .interface_summary_end = self.shared_summaries.?.count,
+            .collect_counters = self.counters != null,
+            .collect_diagnostics = self.diagnostics != null,
+            .inline_expects = self.inline_expects,
+            .comptime_value_reads = self.comptime_value_reads,
+            .literal_roots = self.literal_roots,
+            .replay_interface_summaries = self.replay_interface_summaries,
+            .declared_comptime_roots = self.borrowed_comptime_roots orelse &self.declared_comptime_roots,
+            .hosted_catalog = self.hosted_catalog,
+            .current_loc = self.current_loc,
+            .current_region = self.current_region,
+            .timing_std_io = if (self.timing) |timing| timing.std_io else null,
+        };
+    }
+
     /// Read a worker's domain through a newly completed epoch's views, in
     /// the worker's epoch order, and queue its summaries for sharing.
     fn absorbStoreEpoch(self: *Builder, commit_domain: *SpecJobCommitDomain, epoch: *const SpecJobStoreEpoch) Allocator.Error!void {
@@ -8116,28 +8126,7 @@ const Builder = struct {
         const completions = try self.allocator.alloc(base.post_check_task_executor.Completion, requests.len);
         defer self.allocator.free(completions);
         const snapshot = try self.captureSpecJobInputs();
-        const inputs = SpecJobWorkerInputs{
-            .lanes = try self.specJobLanes(),
-            .modules = self.modules,
-            .module_views = self.moduleViews(),
-            .literal_argument_roots = &self.literal_argument_roots,
-            .source_file_ids = self.sourceFileIds(),
-            .lowering_module_ids = self.loweringModuleIds(),
-            .snapshot = &snapshot,
-            .interface_summaries = &self.shared_summaries.?,
-            .interface_summary_end = self.shared_summaries.?.count,
-            .collect_counters = self.counters != null,
-            .collect_diagnostics = self.diagnostics != null,
-            .inline_expects = self.inline_expects,
-            .comptime_value_reads = self.comptime_value_reads,
-            .literal_roots = self.literal_roots,
-            .replay_interface_summaries = self.replay_interface_summaries,
-            .declared_comptime_roots = self.borrowed_comptime_roots orelse &self.declared_comptime_roots,
-            .hosted_catalog = self.hosted_catalog,
-            .current_loc = self.current_loc,
-            .current_region = self.current_region,
-            .timing_std_io = if (self.timing) |timing| timing.std_io else null,
-        };
+        const inputs = try self.specJobWorkerInputs(&snapshot);
         for (requests, 0..) |request, task_id| {
             contexts[task_id] = .{
                 .inputs = &inputs,
@@ -10310,28 +10299,7 @@ const Builder = struct {
                     const snapshot = try self.captureSpecJobInputs();
                     context.* = .{
                         .snapshot = snapshot,
-                        .inputs = .{
-                            .lanes = try self.specJobLanes(),
-                            .modules = self.modules,
-                            .module_views = self.moduleViews(),
-                            .literal_argument_roots = &self.literal_argument_roots,
-                            .source_file_ids = self.sourceFileIds(),
-                            .lowering_module_ids = self.loweringModuleIds(),
-                            .snapshot = &context.snapshot,
-                            .interface_summaries = &self.shared_summaries.?,
-                            .interface_summary_end = self.shared_summaries.?.count,
-                            .collect_counters = self.counters != null,
-                            .collect_diagnostics = self.diagnostics != null,
-                            .inline_expects = self.inline_expects,
-                            .comptime_value_reads = self.comptime_value_reads,
-                            .literal_roots = self.literal_roots,
-                            .replay_interface_summaries = self.replay_interface_summaries,
-                            .declared_comptime_roots = self.borrowed_comptime_roots orelse &self.declared_comptime_roots,
-                            .hosted_catalog = self.hosted_catalog,
-                            .current_loc = self.current_loc,
-                            .current_region = self.current_region,
-                            .timing_std_io = if (self.timing) |timing| timing.std_io else null,
-                        },
+                        .inputs = try self.specJobWorkerInputs(&context.snapshot),
                         .prepared = .{ .job = job, .view = view, .template = template },
                     };
                     try session.submit(.{ .id = slot, .context = context, .run = runSpecJobTask });
@@ -10962,7 +10930,7 @@ const Builder = struct {
             }
             try body_ctx.seedSubstitution(schema, live);
         } else if (retained_topology == null) {
-            body_ctx.evidence = try body_ctx.rootEvidenceAtOwnScheme(template, spec_evidence);
+            body_ctx.evidence = try body_ctx.rootEvidenceAtOwnScheme(templateSchemaIn(body_ctx.view, &template), spec_evidence);
         }
 
         const graph_fn_ty = try body_ctx.importProgramType(lower_fn_ty);
@@ -22113,21 +22081,6 @@ const InterfaceSummary = union(enum) {
             .constraints => |constraints| .{ .constraints = try constraints.copy(allocator, context) },
         };
     }
-
-    /// Whether two expansions of the request whose input was `input`
-    /// constrain its interface identically. An unchanged summary stands for
-    /// that input itself.
-    fn equivalent(self: InterfaceSummary, other: InterfaceSummary, input: InterfaceConstraints, graph: *InstGraph, allocator: Allocator) Allocator.Error!bool {
-        const left = switch (self) {
-            .unchanged => input,
-            .constraints => |constraints| constraints,
-        };
-        const right = switch (other) {
-            .unchanged => input,
-            .constraints => |constraints| constraints,
-        };
-        return std.mem.eql(u8, try left.equivalenceIdentityInto(graph, allocator), try right.equivalenceIdentityInto(graph, allocator));
-    }
 };
 
 /// An interface summary a body found for replay, with the store domain its
@@ -22353,15 +22306,11 @@ const InterfaceReplayEntry = struct {
     hole_cells: []const NodeId,
     roots: []const NodeId,
     summary: ?InterfaceSummary = null,
-    verify_summary: ?InterfaceSummary = null,
-    /// The request's input, kept while `verify_summary` awaits comparison.
-    verify_input: ?InterfaceConstraints = null,
     status: InterfaceReplayStatus = .expanding,
     lowlink: usize,
 };
 
 const InterfaceReplayState = struct {
-    use_finished_summaries: bool = true,
     entries: std.ArrayList(InterfaceReplayEntry),
     buckets: InterfaceReplayBuckets = .empty,
     stack: std.ArrayList(usize) = .empty,
@@ -27200,8 +27149,13 @@ const BodyContext = struct {
     }
 
     /// The declaring template's evidence chain a restored stored function
-    /// retained after its own head frame.
-    fn storedDeclaringEvidence(self: *BodyContext, owner: names.ProcTemplate) Allocator.Error!EvidenceChain {
+    /// retained after its own head frame. Materializing it appends its
+    /// local-method edges to `local_edges`.
+    fn storedDeclaringEvidence(
+        self: *BodyContext,
+        owner: names.ProcTemplate,
+        local_edges: *StoredLocalEdges,
+    ) Allocator.Error!EvidenceChain {
         if (self.restored_declaring_evidence) |restored| {
             if (!names.procedureTemplateRefEql(restored.owner, owner)) {
                 Common.invariant("restored function reached local procedures declared by two other templates");
@@ -27218,7 +27172,7 @@ const BodyContext = struct {
             Common.invariant("stored function omitted the declaring template's evidence for a local procedure it reaches");
         }
         var cursor: usize = fn_value.evidence_frames[first].roots_start;
-        const chain = try self.materializeEvidenceFrames(restored.store_view, fn_value, owner, first, fn_value.evidence_frames.len, &cursor);
+        const chain = try self.materializeEvidenceFrames(restored.store_view, fn_value, owner, first, fn_value.evidence_frames.len, &cursor, local_edges);
         if (cursor != fn_value.evidence.nodes.len) {
             Common.invariant("stored declaring evidence contained unreferenced nodes");
         }
@@ -29962,15 +29916,6 @@ const BodyContext = struct {
         };
     }
 
-    /// A found summary expressed in this body's own domain, for comparison
-    /// against a fresh expansion.
-    fn graphDomainSummary(self: *BodyContext, found: FoundInterfaceSummary) Allocator.Error!InterfaceSummary {
-        return switch (found.domain) {
-            .graph => found.summary,
-            .program => try found.summary.copy(self.graph.arena(), self.programSummaryDomain()),
-        };
-    }
-
     fn insertInterfaceSummary(self: *BodyContext, entry: InterfaceSummaryEntry) Allocator.Error!InterfaceSummary {
         const binding = self.interfaceSummaryCache();
         if (binding.types_are_durable) {
@@ -30017,7 +29962,12 @@ const BodyContext = struct {
         if (mask.len != subst.len) Common.invariant("parametric request substitution differed from its scheme's quantified variables");
         var count: usize = 0;
         for (mask, subst) |is_parametric, slot| {
-            if (is_parametric and slot == .node) count += 1;
+            switch (slot) {
+                .node => |node| if (is_parametric and !self.classHasFixedSlot(mask, subst, node)) {
+                    count += 1;
+                },
+                .checked_error => {},
+            }
         }
         if (count == 0) return .{};
         const nodes = try allocator.alloc(NodeId, count);
@@ -30028,7 +29978,7 @@ const BodyContext = struct {
         for (mask, subst) |is_parametric, slot| {
             switch (slot) {
                 .node => |node| {
-                    if (is_parametric) {
+                    if (is_parametric and !self.classHasFixedSlot(mask, subst, node)) {
                         nodes[next] = node;
                         root_indices[next] = root_index;
                         next += 1;
@@ -30039,6 +29989,23 @@ const BodyContext = struct {
             }
         }
         return .{ .nodes = nodes, .root_indices = root_indices };
+    }
+
+    /// Whether a slot the mask keeps out of the holes holds `node`'s class.
+    /// A hole makes its whole class an interface parameter, so it may stand
+    /// only for slots that are all parametric. Checking can give a value slot
+    /// and a row tail slot one class: a closed `{}` passed where the scheme's
+    /// row `{ ..tail }` closes at the same `{}`. A hole there would make the
+    /// tail the parameter its own row extends.
+    fn classHasFixedSlot(self: *BodyContext, mask: []const bool, subst: SpecSubstitution, node: NodeId) bool {
+        for (mask, subst) |is_parametric, slot| {
+            if (is_parametric) continue;
+            switch (slot) {
+                .node => |other| if (self.graph.sameClass(other, node)) return true,
+                .checked_error => {},
+            }
+        }
+        return false;
     }
 
     /// An unfinished expansion is joined only by a request for the types it
@@ -30299,7 +30266,7 @@ const BodyContext = struct {
                     return null;
                 },
                 .ready => {
-                    if (!replay_state.use_finished_summaries or !self.builder.replay_interface_summaries.enabled()) continue;
+                    if (!self.builder.replay_interface_summaries.enabled()) continue;
                     // Read the summary before writing `cached`, which the
                     // result location would otherwise leave half-written.
                     const summary = entry.summary orelse continue;
@@ -30308,19 +30275,10 @@ const BodyContext = struct {
                 },
             }
         }
-        if (cached == null and replay_state.use_finished_summaries) cached = try self.findMemoryInterfaceSummary(address, stored_evidence, request);
-        var verify_summary: ?InterfaceSummary = null;
-        const saved_use_summaries = replay_state.use_finished_summaries;
-        expansion.saved_use_summaries = saved_use_summaries;
-        expansion.restores_use_summaries = true;
+        if (cached == null) cached = try self.findMemoryInterfaceSummary(address, stored_evidence, request);
         if (cached) |found| {
             self.builder.count("interface_summary_hits");
-            if (std.debug.runtime_safety and self.builder.diagnostics != null and self.builder.interface_summary_checks < 16) {
-                self.builder.interface_summary_checks += 1;
-                self.builder.count("interface_summary_verifications");
-                verify_summary = try self.graphDomainSummary(found);
-                replay_state.use_finished_summaries = false;
-            } else switch (found.summary) {
+            switch (found.summary) {
                 .unchanged => {
                     self.builder.count("interface_summary_unchanged_hits");
                     return null;
@@ -30360,8 +30318,6 @@ const BodyContext = struct {
             },
             .roots = roots,
             .lowlink = replay_index,
-            .verify_summary = verify_summary,
-            .verify_input = if (verify_summary != null) try input.copy(self.graph.arena(), InterfaceSummaryCopy{}) else null,
         });
         try replay_state.stack.append(self.allocator, replay_index);
         const parent = replay_state.current;
@@ -30420,8 +30376,6 @@ const BodyContext = struct {
         /// frame before the expansion finishes.
         open_scope: ?struct { template: checked.CheckedProcedureTemplate, root_node: NodeId } = null,
         active_local_scopes: ?collections.DenseMap(checked.DispatchScopeId, NodeId) = null,
-        saved_use_summaries: bool = undefined,
-        restores_use_summaries: bool = false,
         parent: ?usize = null,
         restores_current: bool = false,
         replay_index: usize = undefined,
@@ -30452,7 +30406,6 @@ const BodyContext = struct {
             if (expansion.active_local_scopes) |*scopes| scopes.deinit();
             if (expansion.callee_ctx_live) expansion.callee_ctx.deinit();
             if (expansion.restores_current) expansion.replay_state.current = expansion.parent;
-            if (expansion.restores_use_summaries) expansion.replay_state.use_finished_summaries = expansion.saved_use_summaries;
             expansion.caller.graph.releaseArena(expansion.input_arena);
             expansion.request_roots.deinit(allocator);
             allocator.destroy(expansion);
@@ -30469,7 +30422,6 @@ const BodyContext = struct {
             const roots = expansion.roots;
             const request_roots = &expansion.request_roots;
             const parent = expansion.parent;
-            const saved_use_summaries = expansion.saved_use_summaries;
             // A component of one request is complete before it relates back to
             // that request. A parametric request's summary is therefore taken
             // from its expansion alone, so relating back cannot fill its holes.
@@ -30518,19 +30470,13 @@ const BodyContext = struct {
                     else
                         .{ .constraints = constraints };
                     entry.status = .ready;
-                    if (entry.verify_summary) |expected| {
-                        if (!try expected.equivalent(summary, entry.verify_input.?, self.graph, scratch.allocator())) {
-                            Common.compilerBug("cached interface constraints disagreed with fresh checked relation expansion");
-                        }
-                    }
-                    // Completed replay entries borrow the durable cache's immutable
-                    // storage; only uncached verification expansions remain graph-local.
-                    entry.summary = if (saved_use_summaries) try self.insertInterfaceSummary(.{
+                    // Completed replay entries borrow the durable cache's immutable storage.
+                    entry.summary = try self.insertInterfaceSummary(.{
                         .address = entry.address,
                         .evidence = entry.evidence,
                         .request = entry.request,
                         .summary = summary,
-                    }) else try summary.copy(self.graph.arena(), InterfaceSummaryCopy{});
+                    });
                     if (index == replay_index) break;
                 }
             }
@@ -35817,9 +35763,11 @@ const BodyContext = struct {
     /// A divergent expression evaluates its operands in source order, each
     /// for its effect, up to the operand whose evaluation diverges; a
     /// dispatch that cannot run (`DispatchCrashReason`) evaluates all of its
-    /// operands and then crashes. Every operand before the divergence point
-    /// is observable, so none is skipped. Only the operands up to and
-    /// including the first divergent one are listed: nothing after it runs.
+    /// operands and then crashes. An operand whose evaluation has no effect
+    /// (`operandEvaluationHasNoEffect`) is skipped; every other operand
+    /// before the divergence point is observable and evaluates. Only the
+    /// operands up to and including the first divergent one are listed:
+    /// nothing after it runs.
     const OperandSequenceTask = struct {
         /// The operand expressions in evaluation order. Owned.
         operands: []const ExprSite,
@@ -35847,12 +35795,22 @@ const BodyContext = struct {
     }
 
     /// The operands of a divergent expression whose evaluation diverges at
-    /// one of them: every operand up to and including the first divergent
-    /// one, in evaluation order.
-    fn divergentOperandsStep(self: *BodyContext, operands: []const CIR.Expr.Idx, ty: Type.TypeId) Allocator.Error!LowerStep {
-        const refs = try self.exprRefsOf(operands);
-        defer self.allocator.free(refs);
-        return try self.divergentOperandRefsStep(refs, ty);
+    /// one of them: `head`, when present, then `rest`, in evaluation order,
+    /// walked up to and including the first divergent one. Nothing after it
+    /// is read.
+    fn divergentOperandsStep(self: *BodyContext, head: ?CIR.Expr.Idx, rest: []const CIR.Expr.Idx, ty: Type.TypeId) Allocator.Error!LowerStep {
+        const head_len: usize = @intFromBool(head != null);
+        const len = for (0..head_len + rest.len) |index| {
+            const operand = if (index < head_len) head.? else rest[index - head_len];
+            if (try self.checkedExprDivergesInLoweredRuntime(ExprSite.read(operand))) break index + 1;
+        } else Common.invariant("checked expression was marked divergent but no divergent operand was found");
+        const operands = try self.allocator.alloc(ExprSite, len);
+        for (operands, 0..) |*operand, index| operand.* = ExprSite.read(if (index < head_len) head.? else rest[index - head_len]);
+        return requestLowerTask(self, .{ .operand_sequence = .{
+            .operands = operands,
+            .ty = ty,
+            .tail = .diverges,
+        } });
     }
 
     /// Body expressions as their parents read them. Owned.
@@ -35916,9 +35874,12 @@ const BodyContext = struct {
                 .uninhabited => |scrutinee| return try self.finishOperandSequence(task, try self.zeroBranchMatch(scrutinee, task.ty)),
             }
         }
-        if (task.index < task.operands.len) {
+        while (task.index < task.operands.len) {
             const operand = task.operands[task.index];
             task.index += 1;
+            // An operand whose evaluation has no effect is never lowered: no
+            // value, type, or specialization is requested for it.
+            if (self.operandEvaluationHasNoEffect(operand)) continue;
             return requestLowerTask(self, .{ .discarded = .{ .expr = operand } });
         }
         return switch (task.tail) {
@@ -35931,6 +35892,16 @@ const BodyContext = struct {
                 .ty = task.ty,
                 .data = .{ .checked_error = try self.addStringLiteral("runtime error") },
             })),
+        };
+    }
+
+    /// Whether an operand of an operand sequence evaluates with no effect
+    /// (`exprEvaluationHasNoEffect`): a read of a name, a literal, or a
+    /// closure.
+    fn operandEvaluationHasNoEffect(self: *BodyContext, operand: ExprSite) bool {
+        return switch (operand.kind()) {
+            .read => checked.exprEvaluationHasNoEffect(std.meta.activeTag(self.view.bodies.expr(operand.node()).data)),
+            .coerced_value, .hoisted_root, .hoisted_result, .literal_guard, .literal_value, .literal_conversion => false,
         };
     }
 
@@ -35966,14 +35937,8 @@ const BodyContext = struct {
                 task.finish = .{ .expect_err = checked_expr.source_region };
                 return requestLowerTask(self, .{ .inspected = .{ .expr = ExprSite.read(expect_err.expr), .expect_err_snippet = expect_err.snippet } });
             },
-            .list, .tuple => |items| return try self.divergentOperandsStep(items, ty),
-            .str => |parts| {
-                var operands: std.ArrayList(CIR.Expr.Idx) = .empty;
-                defer operands.deinit(self.allocator);
-                if (parts.first) |first| try operands.append(self.allocator, first);
-                try operands.appendSlice(self.allocator, parts.rest);
-                return try self.divergentOperandsStep(operands.items, ty);
-            },
+            .list, .tuple => |items| return try self.divergentOperandsStep(null, items, ty),
+            .str => |parts| return try self.divergentOperandsStep(parts.first, parts.rest, ty),
             .block => |block| return requestLowerTask(self, .{ .block = try self.boxLowerTask(BlockTask, .{
                 .statements = block.statements,
                 .final_expr = ExprSite.read(block.final_expr),
@@ -35989,24 +35954,18 @@ const BodyContext = struct {
                 task.finish = .expr_as_data;
                 return requestLowerTask(self, .{ .if_task = .{ .expr_id = expr_id, .if_ = if_, .result_cell = .{ .sealed = ty } } });
             },
-            .call => |call| {
-                var operands: std.ArrayList(CIR.Expr.Idx) = .empty;
-                defer operands.deinit(self.allocator);
-                try operands.append(self.allocator, call.func);
-                try operands.appendSlice(self.allocator, call.args);
-                return try self.divergentOperandsStep(operands.items, ty);
-            },
+            .call => |call| return try self.divergentOperandsStep(call.func, call.args, ty),
             .record => |record| {
                 var operands: std.ArrayList(CIR.Expr.Idx) = .empty;
                 defer operands.deinit(self.allocator);
                 if (record.ext) |ext| try operands.append(self.allocator, ext);
                 for (record.fields) |field| try operands.append(self.allocator, self.view.bodies.recordFieldValue(field));
-                return try self.divergentOperandsStep(operands.items, ty);
+                return try self.divergentOperandsStep(null, operands.items, ty);
             },
-            .tag => |tag| return try self.divergentOperandsStep(tag.args, ty),
+            .tag => |tag| return try self.divergentOperandsStep(null, tag.args, ty),
             .nominal => |nominal| return self.divergentEffectStep(ExprSite.read(nominal.backing_expr), ty),
             .row_coerce => |coerce| return self.divergentEffectStep(coerce.value, ty),
-            .binop => |binop| return try self.divergentOperandsStep(&.{ binop.lhs, binop.rhs }, ty),
+            .binop => |binop| return try self.divergentOperandsStep(binop.lhs, &.{binop.rhs}, ty),
             .unary_minus,
             .dbg,
             => |child| return self.divergentEffectStep(ExprSite.read(child), ty),
@@ -36015,13 +35974,13 @@ const BodyContext = struct {
             else
                 Common.invariant("omitted checked expect reached divergent runtime lowering"),
             .field_access => |field| return self.divergentEffectStep(ExprSite.read(field.receiver), ty),
-            .structural_eq => |eq| return try self.divergentOperandsStep(&.{ eq.lhs, eq.rhs }, ty),
-            .structural_hash => |hash| return try self.divergentOperandsStep(&.{ hash.value, hash.hasher }, ty),
+            .structural_eq => |eq| return try self.divergentOperandsStep(eq.lhs, &.{eq.rhs}, ty),
+            .structural_hash => |hash| return try self.divergentOperandsStep(hash.value, &.{hash.hasher}, ty),
             .tuple_access => |access| return self.divergentEffectStep(ExprSite.read(access.tuple), ty),
             .for_ => |for_| return self.divergentEffectStep(ExprSite.read(for_.expr), ty),
             .run_low_level => |low_level| {
                 for (low_level.args) |arg| {
-                    if (try self.checkedExprDivergesInLoweredRuntime(ExprSite.read(arg))) return try self.divergentOperandsStep(low_level.args, ty);
+                    if (try self.checkedExprDivergesInLoweredRuntime(ExprSite.read(arg))) return try self.divergentOperandsStep(null, low_level.args, ty);
                 }
                 if (low_level.op != .crash) {
                     Common.invariant("checked low-level expression was marked divergent but no divergent argument was found");
@@ -49982,7 +49941,6 @@ const BodyContext = struct {
         if (fn_value.evidence_frames.len == 0 or fn_value.evidence_frame_head == null) {
             Common.invariant("stored checked function did not contain an explicit evidence root frame");
         }
-        const retained_evidence = try self.materializeConstFnEvidence(store_view, fn_value);
         _ = self.builder.moduleForConstFnDef(fn_value.fn_def);
         const checked_template = templateForConstFnDef(fn_value.fn_def);
         // The recording owner template lives in its OWN module (for a
@@ -49998,7 +49956,6 @@ const BodyContext = struct {
                 .node => try self.builder.constFnDefToMono(fn_value.fn_def),
             },
             request,
-            retained_evidence,
             static_data_const_locator,
         );
         const request_fn_node = switch (request) {
@@ -50011,7 +49968,6 @@ const BodyContext = struct {
             try self.builder.constFnDefToMono(fn_value.fn_def),
             fn_value.source_fn_ty,
             fn_value.source_fn_key,
-            retained_evidence,
             request_fn_node,
         );
         return try self.addExprWithTypeCell(
@@ -50022,11 +49978,14 @@ const BodyContext = struct {
 
     /// Restore a compile-time function value's template into a draft target.
     ///
-    /// The two call sites take their source function type and key from
-    /// different places: one from the stored `ConstFn`, one from the
-    /// `FnTemplate` being specialized. Both travel as explicit arguments
-    /// rather than being read off whichever record the caller happened to
-    /// hold, because that choice is the caller's and not this function's.
+    /// The source function type and key travel as explicit arguments rather
+    /// than being read off the stored `ConstFn`, because that choice is the
+    /// caller's and not this function's.
+    ///
+    /// A nested function restores in its own body, in two steps: the body
+    /// first establishes the stored owner, the evidence topology, and the
+    /// restored lexical scope, then resolves the evidence's local-method
+    /// edges against them (`resolveStoredLocalEdges`).
     fn restoreConstFnTemplateAt(
         self: *BodyContext,
         store_view: ModuleView,
@@ -50034,9 +49993,10 @@ const BodyContext = struct {
         fn_def: Ast.FnDef,
         source_fn_ty: checked.CheckedTypeId,
         source_fn_key: names.TypeDigest,
-        retained_evidence: EvidenceChain,
         request_fn_node: NodeId,
     ) Allocator.Error!DraftFnTarget {
+        var local_edges: StoredLocalEdges = .empty;
+        defer local_edges.deinit(self.allocator);
         return switch (fn_def) {
             .nested => |nested| {
                 const fn_view = self.builder.moduleForConstFnDef(fn_value.fn_def);
@@ -50049,13 +50009,14 @@ const BodyContext = struct {
                     self.draft,
                 );
                 fn_ctx.in_default_expr = constFnDefIsDefaultRoot(fn_value.fn_def);
-                fn_ctx.evidence = retained_evidence;
                 fn_ctx.inheritFrozenEmissionContext(self);
                 defer fn_ctx.deinit();
-                try fn_ctx.replayStoredEvidenceRelations(fn_ctx.evidence);
+                fn_ctx.evidence = try fn_ctx.materializeConstFnEvidence(store_view, fn_value, &local_edges);
                 fn_ctx.current_fn_key = nested.context_fn_key;
                 const restored_local_proc_entries = try fn_ctx.enterRestoredLocalProcScope(store_view, fn_value, nested, nested.context_fn_key);
                 defer if (restored_local_proc_entries) |entries| fn_ctx.allocator.free(entries);
+                try fn_ctx.resolveStoredLocalEdges(local_edges.items);
+                try fn_ctx.replayStoredEvidenceRelations(fn_ctx.evidence);
                 const restored_owner_scope = try fn_ctx.enterRestoredConstFnOwner();
                 defer restored_owner_scope.leave();
                 try fn_ctx.restoreConstFnOwner(store_view, fn_value);
@@ -50075,6 +50036,10 @@ const BodyContext = struct {
                 );
             },
             .local_template, .imported_template, .local_hosted, .imported_hosted, .checked_generated, .parser_runtime, .encoder_for_runtime => blk: {
+                // A template restores in the requesting body, whose
+                // declaration contexts are the ones its evidence reaches.
+                const retained_evidence = try self.materializeConstFnEvidence(store_view, fn_value, &local_edges);
+                try self.resolveStoredLocalEdges(local_edges.items);
                 const template_ref = templateForConstFnDef(fn_value.fn_def);
                 const template_view = self.builder.moduleForDigest(names.procTemplateModuleDigest(template_ref));
                 const template = template_view.templates.get(template_ref.template);
@@ -50101,16 +50066,21 @@ const BodyContext = struct {
         fn_value: check.ConstStore.ConstFn,
         fn_def: Ast.FnDef,
         request: ConstFnRequest,
-        retained_evidence: EvidenceChain,
         static_data_const_locator: ?checked.ConstLocator,
     ) Allocator.Error!DraftExprId {
+        // Restoration runs in the restored function's own body, in two
+        // steps. First the body establishes the stored owner, the evidence
+        // topology, the capture bindings, and the restored lexical scope.
+        // Then it resolves the evidence's local-method edges against that
+        // owner and scope, before anything reads the evidence.
         const fn_view = self.builder.moduleForConstFnDef(fn_value.fn_def);
         var fn_ctx = try BodyContext.init(self.allocator, self.builder, fn_view, ownerTemplateForConstFnDef(fn_value.fn_def), self.graph, self.draft);
         fn_ctx.in_default_expr = constFnDefIsDefaultRoot(fn_value.fn_def);
-        fn_ctx.evidence = retained_evidence;
         fn_ctx.inheritFrozenEmissionContext(self);
         defer fn_ctx.deinit();
-        try fn_ctx.replayStoredEvidenceRelations(fn_ctx.evidence);
+        var local_edges: StoredLocalEdges = .empty;
+        defer local_edges.deinit(self.allocator);
+        fn_ctx.evidence = try fn_ctx.materializeConstFnEvidence(store_view, fn_value, &local_edges);
         const capture_nested = switch (fn_def) {
             .nested => |nested| nested,
             .local_template, .imported_template, .local_hosted, .imported_hosted, .checked_generated, .parser_runtime, .encoder_for_runtime => Common.invariant("capturing stored function had no nested function identity"),
@@ -50147,6 +50117,8 @@ const BodyContext = struct {
 
         const restored_local_proc_entries = try fn_ctx.enterRestoredLocalProcScope(store_view, fn_value, capture_nested, fn_ctx.current_fn_key);
         defer if (restored_local_proc_entries) |entries| fn_ctx.allocator.free(entries);
+        try fn_ctx.resolveStoredLocalEdges(local_edges.items);
+        try fn_ctx.replayStoredEvidenceRelations(fn_ctx.evidence);
 
         const request_fn_node = switch (request) {
             .sealed => |ty| try fn_ctx.activeNodeFromType(ty),
@@ -54021,9 +53993,15 @@ const BodyContext = struct {
         return (try self.runEvidence(.{ .callable_dispatch_result = .{ .checked_ret_ty = checked_ret_ty, .maybe_plan = null, .callable_plan = callable_plan, .expected_ret_node = expected_ret_node, .phase = phase } })).nodeValue();
     }
 
-    /// Restore the evidence of `fn_value`, a function in `store_view`'s
-    /// `ConstStore`.
-    fn materializeConstFnEvidence(self: *BodyContext, store_view: ModuleView, fn_value: check.ConstStore.ConstFn) Allocator.Error!EvidenceChain {
+    /// Restore the evidence topology of `fn_value`, a function in
+    /// `store_view`'s `ConstStore`: its frames and every vector entry. Its
+    /// local-method edges are appended to `local_edges`, unresolved.
+    fn materializeConstFnEvidence(
+        self: *BodyContext,
+        store_view: ModuleView,
+        fn_value: check.ConstStore.ConstFn,
+        local_edges: *StoredLocalEdges,
+    ) Allocator.Error!EvidenceChain {
         const frames = fn_value.evidence_frames;
         const head = fn_value.evidence_frame_head orelse
             Common.invariant("stored function evidence did not declare a head frame");
@@ -54033,7 +54011,7 @@ const BodyContext = struct {
         const owner = ownerTemplateForConstFnDef(fn_value.fn_def);
         const owner_view = self.builder.moduleForDigest(names.procTemplateModuleDigest(owner));
         var cursor: usize = 0;
-        const head_chain = try self.materializeEvidenceFrames(store_view, fn_value, owner, 0, head + 1, &cursor);
+        const head_chain = try self.materializeEvidenceFrames(store_view, fn_value, owner, 0, head + 1, &cursor, local_edges);
         const own_end = if (head + 1 < frames.len) frames[head + 1].roots_start else fn_value.evidence.nodes.len;
         if (cursor != own_end) {
             Common.invariant("stored function evidence contained unreferenced nodes");
@@ -54100,6 +54078,7 @@ const BodyContext = struct {
         first: usize,
         end: usize,
         cursor: *usize,
+        local_edges: *StoredLocalEdges,
     ) Allocator.Error!EvidenceChain {
         const frames = fn_value.evidence_frames;
         const owner_view = self.builder.moduleForDigest(names.procTemplateModuleDigest(owner));
@@ -54109,7 +54088,7 @@ const BodyContext = struct {
             if (frame.roots_start != cursor.*) {
                 Common.invariant("stored function evidence frame roots were not contiguous");
             }
-            const vector = try self.materializeConstFnEvidenceVector(store_view, fn_value.evidence, cursor, frame.roots_len);
+            const vector = try self.materializeConstFnEvidenceVector(store_view, fn_value.evidence, cursor, frame.roots_len, local_edges);
             const scope: LexicalDispatchScope = switch (frame.scope()) {
                 .root => .root,
                 .generalized => |scope_id| .{ .generalized = @fromBackingInt(@intCast(scope_id)) },
@@ -54267,12 +54246,14 @@ const BodyContext = struct {
     ///
     /// `store_view` is the module whose `ConstStore` holds the evidence, or
     /// null for evidence that never names a codec edge by content alone.
+    /// Every local-method target edge is appended to `local_edges`.
     fn materializeConstFnEvidenceVector(
         self: anytype,
         store_view: ?ModuleView,
         evidence: check.ConstStore.ConstFnEvidenceVector,
         cursor: *usize,
         count: u32,
+        local_edges: *StoredLocalEdges,
     ) Allocator.Error![]const SpecEvidence {
         const arena = self.builder.evidence_arena.allocator();
         var frames = std.ArrayList(StoredEvidenceFrame).empty;
@@ -54291,7 +54272,7 @@ const BodyContext = struct {
                         if (cursor.* - nested.nested_start != nested.subtree_len) {
                             Common.invariant("stored function nested evidence length differed from its subtree");
                         }
-                        try self.finishStoredEvidenceTarget(nested.materialized, nested.stored, .{ .resolved = finished.out });
+                        try self.finishStoredEvidenceTarget(nested.materialized, nested.stored, .{ .resolved = finished.out }, local_edges);
                         parent.out[parent.next] = .{ .target = nested.materialized };
                         if (nested.stored.callable_contracts != 0) {
                             parent.pending = .{ .contracts = nested.materialized };
@@ -54335,7 +54316,7 @@ const BodyContext = struct {
                             continue;
                         },
                         .from_callable => {
-                            try self.finishStoredEvidenceTarget(materialized, target, .synthesize);
+                            try self.finishStoredEvidenceTarget(materialized, target, .synthesize, local_edges);
                             contracts_target = materialized;
                             break :blk .{ .target = materialized };
                         },
@@ -54410,11 +54391,16 @@ const BodyContext = struct {
         }
     }
 
+    /// Materialize one stored target edge. A local-method edge's declaration
+    /// context belongs to the restored function, which establishes its owner,
+    /// captures, and lexical scope only after its evidence topology exists, so
+    /// the edge is appended to `local_edges` for `resolveStoredLocalEdges`.
     fn finishStoredEvidenceTarget(
         self: *BodyContext,
         materialized: *SpecEvidenceTarget,
         target: check.ConstStore.ConstFnTargetEvidence,
         nested: NestedSpecEvidence,
+        local_edges: *StoredLocalEdges,
     ) Allocator.Error!void {
         materialized.* = .{
             .view = self.builder.moduleForDigest(target.view),
@@ -54423,23 +54409,38 @@ const BodyContext = struct {
                 .view = self.builder.moduleForDigest(instantiation.view),
                 .callable_ty = instantiation.callable_ty,
             } else null,
-            .local_proc_context = switch (target.method.kind) {
-                .local_proc => |local| blk_context: {
-                    const context_view = self.builder.moduleForDigest(target.view);
-                    const context_id = try self.localProcContextId(context_view, local.binder, local.expr);
-                    _ = self.validateLocalProcContext(
-                        context_id,
-                        self.builder.moduleForDigest(target.view).key.bytes,
-                        local.binder,
-                        local.expr,
-                        local.context_anchor,
-                    );
-                    break :blk_context context_id;
-                },
-                .procedure, .structural, .callable_binding => null,
-            },
+            .local_proc_context = null,
             .nested = nested,
         };
+        switch (target.method.kind) {
+            .local_proc => try local_edges.append(self.allocator, materialized),
+            .procedure, .structural, .callable_binding => {},
+        }
+    }
+
+    /// Resolve the local-method edges of stored evidence against this body's
+    /// declaration contexts. The body restoring the stored function calls
+    /// this once its evidence chain, captures, and restored lexical scope are
+    /// in place: resolving a restored declaration reads the declaring
+    /// template's lexical evidence chain. Each declaration's context is
+    /// created once per restoring body and shared by every edge naming it.
+    fn resolveStoredLocalEdges(self: *BodyContext, edges: []const *SpecEvidenceTarget) Allocator.Error!void {
+        for (edges) |edge| {
+            const local = switch (edge.target.kind) {
+                .local_proc => |local| local,
+                .procedure, .structural, .callable_binding => unreachable, // finishStoredEvidenceTarget appends only local-method edges
+            };
+            std.debug.assert(edge.local_proc_context == null);
+            const context_id = try self.localProcContextId(edge.view, local.binder, local.expr);
+            _ = self.validateLocalProcContext(
+                context_id,
+                edge.view.key.bytes,
+                local.binder,
+                local.expr,
+                local.context_anchor,
+            );
+            edge.local_proc_context = context_id;
+        }
     }
 
     /// Select the producer-authored edge before materializing any evidence.
@@ -54968,10 +54969,9 @@ const BodyContext = struct {
     /// them back into this context would only repeat the lookups.
     fn rootEvidenceAtOwnScheme(
         self: *BodyContext,
-        template: checked.CheckedProcedureTemplate,
+        schema: SchemeRequirements,
         vector: []const SpecEvidence,
     ) Allocator.Error!EvidenceChain {
-        const schema = templateSchemaIn(self.view, &template);
         // These cells and their slot array live only as long as the body graph.
         // Stored function evidence retains the vector and scope, never slots.
         const slots = try self.graph.arena().alloc(SubstSlot, schema.scheme_vars.len);
@@ -55675,7 +55675,7 @@ const BodyContext = struct {
         var roots = std.ArrayList(NodeId).empty;
         defer roots.deinit(self.allocator);
         for (subst) |slot| if (slot == .node) try roots.append(self.allocator, slot.node);
-        if (roots.items.len == 0 or !self.draft.interface_replay.use_finished_summaries) {
+        if (roots.items.len == 0) {
             return try self.relateEvidenceContractsAt(schema, subst, contract);
         }
         const pool = schema.view.templates.evidence_params_pool.items();
@@ -55705,24 +55705,17 @@ const BodyContext = struct {
             .evidence_digest = evidence.digest.bytes,
             .input_digest = interfaceRequestBucket(request.bytes),
         };
-        var verify_summary: ?InterfaceSummary = null;
         if (try self.findMemoryInterfaceSummary(address, evidence, request)) |found| {
             self.builder.count("interface_summary_hits");
-            if (std.debug.runtime_safety and self.builder.diagnostics != null and self.builder.interface_summary_checks < 16) {
-                self.builder.interface_summary_checks += 1;
-                self.builder.count("interface_summary_verifications");
-                verify_summary = try self.graphDomainSummary(found);
-            } else {
-                switch (found.summary) {
-                    .unchanged => self.builder.count("interface_summary_unchanged_hits"),
-                    .constraints => |constraints| {
-                        for (try self.instantiateFoundConstraints(found.domain, constraints), roots.items) |produced, root| {
-                            try self.graph.unify(produced, root);
-                        }
-                    },
-                }
-                return;
+            switch (found.summary) {
+                .unchanged => self.builder.count("interface_summary_unchanged_hits"),
+                .constraints => |constraints| {
+                    for (try self.instantiateFoundConstraints(found.domain, constraints), roots.items) |produced, root| {
+                        try self.graph.unify(produced, root);
+                    }
+                },
             }
+            return;
         }
         self.builder.count("interface_summary_expansions");
         // Relate independent copies of the substitution's cells, so unrelated
@@ -55740,18 +55733,12 @@ const BodyContext = struct {
             .unchanged
         else
             .{ .constraints = constraints };
-        if (verify_summary) |expected| {
-            if (!try expected.equivalent(summary, input, self.graph, scratch.allocator())) {
-                Common.compilerBug("cached evidence contract relations disagreed with a fresh expansion");
-            }
-        } else {
-            _ = try self.insertInterfaceSummary(.{
-                .address = address,
-                .evidence = evidence,
-                .request = request,
-                .summary = summary,
-            });
-        }
+        _ = try self.insertInterfaceSummary(.{
+            .address = address,
+            .evidence = evidence,
+            .request = request,
+            .summary = summary,
+        });
         for (detached, roots.items) |produced, root| try self.graph.unify(produced, root);
     }
 
@@ -55826,15 +55813,12 @@ const BodyContext = struct {
             .evidence_digest = @splat(0),
             .input_digest = interfaceRequestBucket(request.bytes),
         };
-        const use_summaries = self.draft.interface_replay.use_finished_summaries;
-        if (use_summaries) {
-            if (try self.findMemoryInterfaceSummary(address, evidence, request)) |found| {
-                switch (found.summary) {
-                    .unchanged => {},
-                    .constraints => |constraints| try self.graph.unify((try self.instantiateFoundConstraints(found.domain, constraints))[0], constraint_node),
-                }
-                return;
+        if (try self.findMemoryInterfaceSummary(address, evidence, request)) |found| {
+            switch (found.summary) {
+                .unchanged => {},
+                .constraints => |constraints| try self.graph.unify((try self.instantiateFoundConstraints(found.domain, constraints))[0], constraint_node),
             }
+            return;
         }
         // Relate an independent copy, so unrelated caller state cannot enter
         // the retained result. Open variables remain fresh on each replay.
@@ -55851,19 +55835,17 @@ const BodyContext = struct {
         };
         const target_node = try self.instantiateEvidenceTargetSignature(target, address.family, detached_subst);
         try self.relateEvidenceTargetRootToRequest(root_view, root_fn_ty, target_node, detached);
-        if (use_summaries) {
-            const constraints = try InterfaceConstraints.capture(self.graph, scratch.allocator(), &.{detached});
-            const summary: InterfaceSummary = if (try constraints.identityEql(self.graph, request))
-                .unchanged
-            else
-                .{ .constraints = constraints };
-            _ = try self.insertInterfaceSummary(.{
-                .address = address,
-                .evidence = evidence,
-                .request = request,
-                .summary = summary,
-            });
-        }
+        const constraints = try InterfaceConstraints.capture(self.graph, scratch.allocator(), &.{detached});
+        const summary: InterfaceSummary = if (try constraints.identityEql(self.graph, request))
+            .unchanged
+        else
+            .{ .constraints = constraints };
+        _ = try self.insertInterfaceSummary(.{
+            .address = address,
+            .evidence = evidence,
+            .request = request,
+            .summary = summary,
+        });
         try self.graph.unify(detached, constraint_node);
     }
 
@@ -55878,7 +55860,7 @@ const BodyContext = struct {
         family: DraftTemplateFamilyAddress,
         subst: SpecSubstitution,
     ) Allocator.Error!NodeId {
-        const cacheable = subst.len == 0 and target.target.kind == .procedure and self.draft.interface_replay.use_finished_summaries;
+        const cacheable = subst.len == 0 and target.target.kind == .procedure;
         const address: InterfaceReplayAddress = .{
             .kind = .method_signature,
             .family = family,
@@ -56548,7 +56530,10 @@ const BodyContext = struct {
         plan: static_dispatch.StaticDispatchCallPlan,
     ) Allocator.Error!void {
         if (fn_value.evidence_frames.len != 0) {
-            self.evidence = try self.materializeConstFnEvidence(store_view, fn_value);
+            var local_edges: StoredLocalEdges = .empty;
+            defer local_edges.deinit(self.allocator);
+            self.evidence = try self.materializeConstFnEvidence(store_view, fn_value, &local_edges);
+            try self.resolveStoredLocalEdges(local_edges.items);
             try self.replayStoredEvidenceRelations(self.evidence);
             return;
         }
@@ -67999,8 +67984,10 @@ const BodyContext = struct {
             .context_anchor = context_anchor,
             .method = context_anchor != null,
         };
+        var declaring_local_edges: StoredLocalEdges = .empty;
+        defer declaring_local_edges.deinit(self.allocator);
+        const declared = try self.restoredLocalProcDeclaration(view, expr, &declaring_local_edges);
         const context_id: DraftLocalProcContextId = @fromBackingInt(@intCast(@as(u32, @intCast(self.draft.local_proc_contexts.items.len))));
-        const declared = try self.restoredLocalProcDeclaration(view, expr);
         if (!names.procedureTemplateRefEql(declared.owner, self.owner_template)) {
             self.may_see_other_template_local_procs = true;
         }
@@ -68018,6 +68005,9 @@ const BodyContext = struct {
             return err;
         };
         try self.putLocalProcContext(address, context_id);
+        // The declaring chain's own local-method edges resolve once this
+        // declaration's context is visible, so an edge naming it shares it.
+        try self.resolveStoredLocalEdges(declaring_local_edges.items);
         return context_id;
     }
 
@@ -68031,11 +68021,13 @@ const BodyContext = struct {
     /// names the template that declares it. That is this body's own template
     /// unless the restored function reached the procedure through a
     /// declaration context another template handed it, whose chain the stored
-    /// function retained after its own.
+    /// function retained after its own. Materializing that chain appends its
+    /// local-method edges to `declaring_local_edges`.
     fn restoredLocalProcDeclaration(
         self: *BodyContext,
         view: ModuleView,
         expr: CIR.Expr.Idx,
+        declaring_local_edges: *StoredLocalEdges,
     ) Allocator.Error!RestoredLocalProcDeclaration {
         var site: ?checked.NestedProcSite = null;
         for (view.nested_proc_sites.sites.items()) |candidate| {
@@ -68070,7 +68062,7 @@ const BodyContext = struct {
         const chain = if (names.procedureTemplateRefEql(owner, self.owner_template))
             self.evidence
         else
-            try self.storedDeclaringEvidence(owner);
+            try self.storedDeclaringEvidence(owner, declaring_local_edges);
         return .{
             .owner = owner,
             .evidence = chain.atScope(.{
@@ -69438,7 +69430,8 @@ const CompletionAnalysisFixture = struct {
     types: Type.Store,
     name_store: names.NameStore,
     graph: *InstGraph,
-    builder: Builder,
+    program: Ast.Program,
+    lowering: TestLowering,
     ctx: BodyContext,
     diagnostics: solve.GraphDiagnostics,
 
@@ -69449,24 +69442,20 @@ const CompletionAnalysisFixture = struct {
         self.name_store = names.NameStore.init(allocator);
         errdefer self.name_store.deinit();
         self.graph = try InstGraph.create(allocator, &self.types, &self.name_store);
+        errdefer self.graph.destroy();
         self.diagnostics = .{};
         self.graph.setDiagnostics(&self.diagnostics);
-        self.builder = undefined;
-        self.builder.app_module_identity = null;
-        self.builder.timing = null;
-        self.ctx = undefined;
-        self.ctx.allocator = allocator;
-        self.ctx.builder = &self.builder;
-        self.ctx.graph = self.graph;
-        self.ctx.node_uninhabited_scratch = .{};
-        self.ctx.analysis_memo = .{};
-        self.ctx.completion_scratch = .{};
+        self.program = Ast.Program.init(allocator);
+        errdefer self.program.deinit();
+        try self.lowering.init(allocator, &self.program, .{});
+        errdefer self.lowering.deinit();
+        self.ctx = try self.lowering.bodyContext(self.graph);
     }
 
     fn deinit(self: *@This()) void {
-        self.ctx.completion_scratch.deinit(self.allocator);
-        self.ctx.analysis_memo.deinit(self.allocator);
-        self.ctx.node_uninhabited_scratch.deinit(self.allocator);
+        self.ctx.deinit();
+        self.lowering.deinit();
+        self.program.deinit();
         self.graph.destroy();
         self.name_store.deinit();
         self.types.deinit();
@@ -69882,6 +69871,51 @@ test "independent callable keeps target-owned evidence and rejects per-use recor
     try std.testing.expect(callable_derived == .synthesize);
 }
 
+/// Test scaffolding: a coordinator `Builder` made by `Builder.init` over an
+/// empty checked-module set, plus that module's view and a body draft for
+/// body contexts. Every field a test hands the lowering is defined, so a test
+/// never depends on which fields the code it drives happens to read. It is
+/// initialized in place because the builder and the view point into its
+/// checked-module set.
+const TestLowering = struct {
+    empty_modules: Common.EmptyCheckedModulesForTest,
+    builder: Builder,
+    view_data: ModuleViewData,
+    draft: BodyDraftStore,
+
+    /// `allocator` backs the builder and its draft. The checked-module set,
+    /// which no lowering allocates into, uses the testing allocator.
+    fn init(self: *TestLowering, allocator: Allocator, program: *Ast.Program, options: Options) Allocator.Error!void {
+        try self.empty_modules.init(std.testing.allocator);
+        self.builder = Builder.init(allocator, self.empty_modules.modules(), program, options);
+        self.view_data = moduleViewData(self.empty_modules.view());
+        self.draft = BodyDraftStore.init(allocator);
+    }
+
+    fn deinit(self: *TestLowering) void {
+        self.draft.deinit();
+        self.builder.deinit();
+        self.empty_modules.deinit(std.testing.allocator);
+    }
+
+    /// Point the view at `types` under the all-zero module key, seeded as a
+    /// lowering input of the program as the coordinator does.
+    fn seedView(self: *TestLowering, types: checked.CheckedTypeStoreView) Allocator.Error!void {
+        self.view_data.key = .{ .bytes = @splat(0) };
+        self.view_data.lowering_module = try self.builder.program.addLoweringModule(self.view_data.key);
+        self.view_data.types = types;
+    }
+
+    /// A body context over `graph` for the view, made by the coordinator's
+    /// own body-state constructor. Its evidence chain has no frames. The
+    /// pool slot its memos return to is reserved here, so releasing it
+    /// allocates nothing an allocation-failure sweep would see dropped.
+    fn bodyContext(self: *TestLowering, graph: *InstGraph) Allocator.Error!BodyContext {
+        try self.builder.body_memo_pool.ensureUnusedCapacity(self.builder.allocator, 1);
+        return BodyContext.initBodyState(self.builder.allocator, &self.builder, &self.view_data, std.mem.zeroes(names.ProcTemplate), graph, &self.draft);
+    }
+};
+
 test "queued specialization skips a body claimed immediately before dispatch" {
     const allocator = std.testing.allocator;
     var program = Ast.Program.init(allocator);
@@ -69902,28 +69936,10 @@ test "queued specialization skips a body claimed immediately before dispatch" {
     };
 
     var diagnostics: Diagnostics = .{};
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.active_graph = null;
-    builder.active_body_draft = null;
-    builder.post_check_executor = null;
-    builder.pending_spec_jobs = .empty;
-    defer builder.pending_spec_jobs.deinit(allocator);
-    builder.discovery_specs = .empty;
-    builder.next_spec_dispatch_index = 0;
-    builder.next_spec_accept_index = 0;
-    builder.counters = null;
-    builder.diagnostics = &diagnostics;
-    builder.active_spec_job_diagnostics = null;
-    builder.spec_store = specialize.SpecBuilder.init(
-        allocator,
-        &program.names,
-        &program.types,
-        &program.specs,
-    );
-    defer builder.spec_store.deinit();
-    builder.lowered_templates = collections.DenseMap(Ast.FnId, LoweredTemplate).init(allocator);
-    defer builder.lowered_templates.deinit();
+    var lowering: TestLowering = undefined;
+    try lowering.init(allocator, &program, .{ .diagnostics = &diagnostics });
+    defer lowering.deinit();
+    const builder = &lowering.builder;
 
     const makeReservedJob = struct {
         fn make(
@@ -69978,11 +69994,11 @@ test "queued specialization skips a body claimed immediately before dispatch" {
         }
     }.make;
 
-    const first = try makeReservedJob(&builder, &program, template_ref, fn_template, ty, 0);
+    const first = try makeReservedJob(builder, &program, template_ref, fn_template, ty, 0);
     try builder.pending_spec_jobs.append(allocator, first);
     builder.next_spec_dispatch_index += 1;
     builder.countBodyDiagnostic("spec_jobs_enqueued");
-    const second = try makeReservedJob(&builder, &program, template_ref, fn_template, ty, 1);
+    const second = try makeReservedJob(builder, &program, template_ref, fn_template, ty, 1);
     try builder.pending_spec_jobs.append(allocator, second);
     builder.next_spec_dispatch_index += 1;
     builder.countBodyDiagnostic("spec_jobs_enqueued");
@@ -70463,32 +70479,32 @@ const PrivateDestinationFixture = struct {
     workspace: SpecJobWorkspace,
     epoch: SpecJobEpoch,
     graph: *InstGraph,
-    draft: BodyDraftStore,
-    builder: Builder,
+    lowering: TestLowering,
     ctx: BodyContext,
 
     fn init(self: *PrivateDestinationFixture, gpa: Allocator) Allocator.Error!void {
         self.program = Ast.Program.init(gpa);
+        errdefer self.program.deinit();
         self.workspace = SpecJobWorkspace.init(gpa);
+        errdefer self.workspace.deinit();
         self.epoch = self.workspace.beginEpoch(&self.program);
+        errdefer self.workspace.finishEpoch(self.epoch);
         self.graph = try InstGraph.create(gpa, &self.workspace.types, &self.workspace.name_store);
-        self.draft = BodyDraftStore.init(gpa);
-        self.draft.spec_job_workspace = &self.workspace;
-        self.draft.mutable_graph_names = &self.workspace.name_store;
-        self.builder = undefined;
-        self.builder.program = &self.program;
-        self.builder.force_program_type_destination = false;
-        self.builder.active_body_draft = &self.draft;
-        self.builder.active_graph = self.graph;
-        self.ctx = undefined;
-        self.ctx.allocator = gpa;
-        self.ctx.builder = &self.builder;
-        self.ctx.graph = self.graph;
-        self.ctx.draft = &self.draft;
+        errdefer self.graph.destroy();
+        try self.lowering.init(gpa, &self.program, .{});
+        errdefer self.lowering.deinit();
+        self.lowering.draft.spec_job_workspace = &self.workspace;
+        self.lowering.draft.mutable_graph_names = &self.workspace.name_store;
+        self.ctx = try self.lowering.bodyContext(self.graph);
+        self.lowering.builder.active_body_draft = &self.lowering.draft;
+        self.lowering.builder.active_graph = self.graph;
     }
 
     fn deinit(self: *PrivateDestinationFixture) void {
-        self.draft.deinit();
+        self.lowering.builder.active_body_draft = null;
+        self.lowering.builder.active_graph = null;
+        self.ctx.deinit();
+        self.lowering.deinit();
         self.graph.destroy();
         self.workspace.finishEpoch(self.epoch);
         self.workspace.deinit();
@@ -70515,7 +70531,7 @@ test "both lowering scopes read one tag row under a private specialization desti
     }) });
     try std.testing.expectEqual(@backingInt(program_ty), @backingInt(str_ty));
 
-    const builder_types = fixture.builder.activeTypeStore();
+    const builder_types = fixture.lowering.builder.activeTypeStore();
     const body_types = fixture.ctx.typeStore();
     try std.testing.expect(builder_types == body_types);
     const builder_tags = tagUnionTags(builder_types, row);
@@ -70527,9 +70543,9 @@ test "both lowering scopes read one tag row under a private specialization desti
 
     // Lookup by tag and lookup of a tag's payloads find the same tag, from
     // either scope's name store.
-    try std.testing.expect(fixture.builder.activeNameStore() == fixture.ctx.nameStore());
+    try std.testing.expect(fixture.lowering.builder.activeNameStore() == fixture.ctx.nameStore());
     for ([_]names.TagNameId{ ok, err }) |name| {
-        const by_tag = tagByName(builder_types, fixture.builder.activeNameStore(), row, name);
+        const by_tag = tagByName(builder_types, fixture.lowering.builder.activeNameStore(), row, name);
         const payloads = tagPayloadTypes(body_types, fixture.ctx.nameStore(), row, name);
         const by_tag_payloads = body_types.span(by_tag.payloads);
         try std.testing.expectEqual(GuardedList.borrowLen(by_tag_payloads), GuardedList.borrowLen(payloads));
@@ -70544,7 +70560,7 @@ fn readCoordinatorTypesUnderPrivateDestination() Allocator.Error!void {
     var fixture: PrivateDestinationFixture = undefined;
     try fixture.init(std.testing.allocator);
     defer fixture.deinit();
-    _ = fixture.builder.coordinatorTypes();
+    _ = fixture.lowering.builder.coordinatorTypes();
 }
 
 test "coordinator adapter type reads require the program destination" {
@@ -70651,16 +70667,11 @@ test "monotype sameType keeps failed alias alternatives out of recursion stack" 
         .backing = .some(.{ .ty = str_ty, .use = .inspectable }),
     } });
 
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.program = &program;
-    builder.active_body_draft = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = std.testing.allocator;
-    ctx.builder = &builder;
-    ctx.graph = graph;
+    var lowering: TestLowering = undefined;
+    try lowering.init(std.testing.allocator, &program, .{});
+    defer lowering.deinit();
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
 
     try std.testing.expect(ctx.sameType(alias_i64, i64_ty));
     try std.testing.expect(ctx.sameType(str_ty, alias_str));
@@ -70691,21 +70702,12 @@ test "body context inspects graph-owned types despite program TypeId collisions"
     const graph_ty = try graph_types.add(.{ .primitive = .u64 });
     try std.testing.expectEqual(@backingInt(program_ty), @backingInt(graph_ty));
 
-    var draft = BodyDraftStore.init(gpa);
-    defer draft.deinit();
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.program = &program;
-    builder.active_body_draft = null;
-    builder.bool_ty = program_ty;
-    builder.timing = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = gpa;
-    ctx.builder = &builder;
-    ctx.graph = graph;
-    ctx.draft = &draft;
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
+    lowering.builder.bool_ty = program_ty;
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
 
     try std.testing.expect(ctx.typeStore() == &graph_types);
     try std.testing.expectEqual(Type.Content{ .primitive = .u64 }, shapeContent(ctx.typeStore(), graph_ty));
@@ -70748,7 +70750,10 @@ test "frozen codec format index resolves equivalent TypeIds only for agreeing ro
     try std.testing.expect(first_shape != second_shape);
     try std.testing.expect(try type_store.typeEql(&name_store, first_shape, second_shape));
 
-    var view_data: ModuleViewData = undefined;
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(gpa);
+    defer empty_modules.deinit(gpa);
+    var view_data = moduleViewData(empty_modules.view());
     const view = &view_data;
     view.key = .{};
     // These opaque ids are deliberate synthetic identities: this unit only
@@ -70837,8 +70842,13 @@ test "graph constructor representation follows aliases and preserves nominal lay
         .backing = .some(.{ .node = nominal, .use = .inspectable }),
     }));
 
-    var ctx: BodyContext = undefined;
-    ctx.graph = graph;
+    var program = Ast.Program.init(gpa);
+    defer program.deinit();
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
     try std.testing.expectEqual(structural, (try ctx.constructorRepresentationNode(structural)));
     try std.testing.expectEqual(structural, (try ctx.constructorRepresentationNode(alias)));
     try std.testing.expectEqual(nominal, (try ctx.constructorRepresentationNode(nominal)));
@@ -70862,48 +70872,29 @@ test "issue 11288: root substitutions share lexical cells and isolate separate i
     try checked_types.fillSyntheticTypeRoot(gpa, outer_ty, .{ .flex = .{} });
     try checked_types.fillSyntheticTypeRoot(gpa, inner_ty, .{ .flex = .{} });
     const fn_ty = try checked_types.appendSyntheticFunctionRoot(gpa, .pure, &.{outer_ty}, outer_ty);
-    var scheme_vars = [_]checked.CheckedTypeId{outer_ty};
-    const templates = checked.CheckedProcedureTemplateTable{ .scheme_vars_pool = .fromBorrowedSlice(&scheme_vars) };
-    var template: checked.CheckedProcedureTemplate = undefined;
-    template.checked_fn_root = fn_ty;
-    template.scheme_vars = .{ .start = 0, .len = 1 };
-    template.evidence_params = .{};
 
     // Only type instantiation and lexical binding are exercised here.
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.next_instantiation_scope = 0;
-    builder.allocator = gpa;
-    builder.node_map_pool = .empty;
-    builder.node_map_pool_outstanding = 0;
-    defer {
-        for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-        builder.node_map_pool.deinit(gpa);
-    }
-    builder.timing = null;
-    builder.diagnostics = null;
-    builder.active_spec_job_diagnostics = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = gpa;
-    ctx.builder = &builder;
-    ctx.graph = graph;
-    ctx.owner_template = std.mem.zeroes(names.ProcTemplate);
-    var ctx_view: ModuleViewData = undefined;
-    ctx.view = &ctx_view;
-    ctx_view.key = .{ .bytes = @splat(0) };
-    ctx_view.types = checked_types.view();
-    ctx_view.templates = &templates;
-    ctx.resolves_enclosing_variables = false;
-    ctx.relation_variables = null;
-    ctx.constructing_scheme_vars = &.{};
-    ctx.instantiation = TypeInstantiationContext.init(gpa, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-    // An evidence chain without frames: no scope is read.
-    ctx.evidence = .{ .scope = undefined };
-    defer ctx.instantiation.deinit();
+    var program = Ast.Program.init(std.testing.allocator);
+    defer program.deinit();
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
+    const builder = &lowering.builder;
+    lowering.view_data.key = .{ .bytes = @splat(0) };
+    lowering.view_data.types = checked_types.view();
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
+    // The scheme of a template whose checked root is `fn_ty`, generalized
+    // over `outer_ty`.
+    const schema: SchemeRequirements = .{
+        .view = ctx.view,
+        .root = fn_ty,
+        .scheme_vars = &.{outer_ty},
+        .params = &.{},
+        .params_start = 0,
+    };
 
-    const root = try ctx.rootEvidenceAtOwnScheme(template, &.{});
+    const root = try ctx.rootEvidenceAtOwnScheme(schema, &.{});
     const outer_node = root.subst[0].node;
     const root_node = try ctx.instNode(fn_ty);
     const str_node = try graph.newNode(.{ .primitive = .str });
@@ -70930,7 +70921,7 @@ test "issue 11288: root substitutions share lexical cells and isolate separate i
     var sibling = ctx;
     sibling.instantiation = TypeInstantiationContext.init(gpa, builder.allocateInstantiationScope(), ctx.view.key.bytes);
     defer sibling.instantiation.deinit();
-    const sibling_root = try sibling.rootEvidenceAtOwnScheme(template, &.{});
+    const sibling_root = try sibling.rootEvidenceAtOwnScheme(schema, &.{});
     const sibling_node = try sibling.instNode(fn_ty);
     const sibling_request = try graph.newNode(.{ .func = .{ .args = try graph.arena().dupe(NodeId, &.{inner_node}), .ret = inner_node } });
     try relateConstructionFunctionRequestInterface(graph, sibling_node, sibling_request);
@@ -70976,7 +70967,10 @@ test "issue 11265: forwarded evidence compares methods in their owning name stor
     const other_decode_ty = try checked_types.appendSyntheticFunctionRoot(gpa, .pure, &.{other_receiver_ty}, other_receiver_ty);
     const decode_ty = try checked_types.appendSyntheticFunctionRoot(gpa, .pure, &.{receiver_ty}, receiver_ty);
 
-    var frame_view_data: ModuleViewData = undefined;
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(gpa);
+    defer empty_modules.deinit(gpa);
+    var frame_view_data = moduleViewData(empty_modules.view());
     const frame_view = &frame_view_data;
     frame_view.names = &frame_names;
     frame_view.types = checked_types.view();
@@ -70997,8 +70991,13 @@ test "issue 11265: forwarded evidence compares methods in their owning name stor
         .subst = &.{ .{ .node = receiver }, .{ .node = other_receiver } },
         .vector = &.{ .{ .structural = .{ .derivation = .encoder } }, .checked_error, .{ .structural = .{ .derivation = .parser } } },
     };
-    var ctx: BodyContext = undefined;
-    ctx.graph = graph;
+    var program = Ast.Program.init(gpa);
+    defer program.deinit();
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
     ctx.evidence = frame;
 
     // Different methods with equal IDs must stay distinct, and the same
@@ -71015,7 +71014,7 @@ test "issue 11265: forwarded evidence compares methods in their owning name stor
     defer inner_names.deinit();
     const inner_method = try inner_names.internMethodName(Ident.IS_EQ_METHOD_NAME);
     try std.testing.expectEqual(caller_decode, inner_method);
-    var inner_view_data: ModuleViewData = undefined;
+    var inner_view_data = moduleViewData(empty_modules.view());
     const inner_view = &inner_view_data;
     inner_view.names = &inner_names;
     inner_view.types = checked_types.view();
@@ -71059,22 +71058,25 @@ test "specialization evidence equality includes exact target instantiation" {
     try checked_types.fillSyntheticTypeRoot(gpa, fresh, .{ .tuple = fresh_elems });
     try std.testing.expectEqual(check.CheckedTypeIds.fromSynthesized(10), fresh);
 
-    var target_view_data: ModuleViewData = undefined;
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(gpa);
+    defer empty_modules.deinit(gpa);
+    var target_view_data = moduleViewData(empty_modules.view());
     const target_view = &target_view_data;
     target_view.key = .{};
     target_view.key.bytes[0] = 1;
     target_view.types = checked_types.view();
-    var other_target_view_data: ModuleViewData = undefined;
+    var other_target_view_data = moduleViewData(empty_modules.view());
     const other_target_view = &other_target_view_data;
     other_target_view.key = .{};
     other_target_view.key.bytes[0] = 2;
     other_target_view.types = checked_types.view();
-    var instantiation_view_data: ModuleViewData = undefined;
+    var instantiation_view_data = moduleViewData(empty_modules.view());
     const instantiation_view = &instantiation_view_data;
     instantiation_view.key = .{};
     instantiation_view.key.bytes[0] = 3;
     instantiation_view.types = checked_types.view();
-    var other_instantiation_view_data: ModuleViewData = undefined;
+    var other_instantiation_view_data = moduleViewData(empty_modules.view());
     const other_instantiation_view = &other_instantiation_view_data;
     other_instantiation_view.key = .{};
     other_instantiation_view.key.bytes[0] = 4;
@@ -72638,11 +72640,10 @@ test "hosted extern boundary admits only the declared host ABI type" {
     var program = Ast.Program.init(allocator);
     defer program.deinit();
 
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.allocator = allocator;
-    builder.program = &program;
-    builder.active_body_draft = null;
+    var lowering: TestLowering = undefined;
+    try lowering.init(allocator, &program, .{});
+    defer lowering.deinit();
+    const builder = &lowering.builder;
 
     const module_identity = try program.names.internModuleIdentity(&(@as([32]u8, @splat(0xC3))));
     const try_def = Type.TypeDef{
@@ -73906,10 +73907,18 @@ test "Monotype lane state belongs to its run" {
     const allocator = std.testing.allocator;
     var lane_state = base.post_check_task_executor.LaneState.init(allocator);
     defer lane_state.deinit();
+    var program = Ast.Program.init(allocator);
+    defer program.deinit();
+    var lowering: TestLowering = undefined;
+    try lowering.init(allocator, &program, .{});
+    defer lowering.deinit();
+    const builder = &lowering.builder;
+    // The run's two lanes, which the builder owns and releases.
     const lanes = try allocator.alloc(?*SpecJobLaneState, 2);
     @memset(lanes, null);
-    var inputs: SpecJobWorkerInputs = undefined;
-    inputs.lanes = lanes;
+    builder.spec_job_lanes = lanes;
+    const snapshot = try builder.captureSpecJobInputs();
+    var inputs = try builder.specJobWorkerInputs(&snapshot);
     const first_worker = base.post_check_task_executor.Worker{
         .id = 0,
         .allocator = allocator,
@@ -73932,7 +73941,6 @@ test "Monotype lane state belongs to its run" {
     // The executor's own lane storage holds nothing of the run, so nothing
     // of it outlives the run's builder.
     try std.testing.expectEqual(@as(usize, 0), lane_state.entries.items.len);
-    Builder.deinitSpecJobLanes(allocator, lanes);
 }
 
 test "body draft comptime roots relocate independent shards and survive source destruction" {
@@ -74252,9 +74260,29 @@ test "body draft block statement spans use the retained compaction map" {
     values[@backingInt(DraftCoreKind.stmt_ids)] = stmt_ids;
     var maps = Builder.DraftCoreMaps{ .values = values };
 
-    var ids: FinalIdOffsets = undefined;
-    ids.stmt_ids_start = 900;
-    ids.core_id_mode = .{ .remapped = &maps };
+    const ids: FinalIdOffsets = .{
+        .fn_start = 0,
+        .def_start = 0,
+        .nested_def_start = 0,
+        .expr_start = 0,
+        .pat_start = 0,
+        .stmt_start = 0,
+        .local_start = 0,
+        .string_literal_start = 0,
+        .comptime_site_start = 0,
+        .expr_ids_start = 0,
+        .pat_ids_start = 0,
+        .typed_locals_start = 0,
+        .stmt_ids_start = 900,
+        .field_expr_start = 0,
+        .field_access_segment_start = 0,
+        .fn_def_capture_start = 0,
+        .record_destruct_start = 0,
+        .str_pattern_step_start = 0,
+        .branch_start = 0,
+        .if_branch_start = 0,
+        .core_id_mode = .{ .remapped = &maps },
+    };
 
     var draft = BodyDraftStore.init(std.testing.allocator);
     defer draft.deinit();
@@ -74421,39 +74449,13 @@ test "issue 11362: checked instantiation reserves only recursive node identities
 
     var program = Ast.Program.init(gpa);
     defer program.deinit();
-    var builder: Builder = undefined;
-    builder.program = &program;
-    builder.app_module_identity = null;
-    builder.next_instantiation_scope = 0;
-    builder.allocator = gpa;
-    builder.node_map_pool = .empty;
-    builder.node_map_pool_outstanding = 0;
-    defer {
-        for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-        builder.node_map_pool.deinit(gpa);
-    }
-    builder.timing = null;
-    builder.diagnostics = &diagnostics;
-    builder.active_spec_job_diagnostics = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = gpa;
-    ctx.builder = &builder;
-    ctx.graph = graph;
-    var ctx_view: ModuleViewData = undefined;
-    ctx.view = &ctx_view;
-    ctx_view.key = .{ .bytes = @splat(0) };
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{ .diagnostics = &diagnostics });
+    defer lowering.deinit();
     // The program seeds this module as its lowering input, as the coordinator does.
-    ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-    ctx_view.types = checked_types.view();
-    ctx.instantiation = TypeInstantiationContext.init(gpa, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-    ctx.resolves_enclosing_variables = false;
-    ctx.relation_variables = null;
-    ctx.constructing_scheme_vars = &.{};
-    // An evidence chain without frames: no scope is read.
-    ctx.evidence = .{ .scope = undefined };
-    defer ctx.instantiation.deinit();
+    try lowering.seedView(checked_types.view());
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
 
     const function_node = try ctx.instNode(function);
     try std.testing.expectEqual(@as(u64, 2), diagnostics.graph.nodes_created);
@@ -74510,39 +74512,13 @@ test "issue 11362: allocation failure removes active checked instantiation marke
             try checked_types.fillSyntheticTypeRoot(gpa, recursive, .{ .tuple = try gpa.dupe(checked.CheckedTypeId, &.{recursive}) });
             var program = Ast.Program.init(gpa);
             defer program.deinit();
-            var builder: Builder = undefined;
-            builder.program = &program;
-            builder.app_module_identity = null;
-            builder.next_instantiation_scope = 0;
-            builder.allocator = gpa;
-            builder.node_map_pool = .empty;
-            builder.node_map_pool_outstanding = 0;
-            defer {
-                for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-                builder.node_map_pool.deinit(gpa);
-            }
-            builder.timing = null;
-            builder.diagnostics = null;
-            builder.active_spec_job_diagnostics = null;
-            var ctx: BodyContext = undefined;
-            builder.task_storage = .{};
-            defer builder.task_storage.deinit(ctx.allocator);
-            ctx.allocator = allocator;
-            ctx.builder = &builder;
-            ctx.graph = graph;
-            var ctx_view: ModuleViewData = undefined;
-            ctx.view = &ctx_view;
-            ctx_view.key = .{ .bytes = @splat(0) };
+            var lowering: TestLowering = undefined;
+            try lowering.init(allocator, &program, .{});
+            defer lowering.deinit();
             // The program seeds this module as its lowering input, as the coordinator does.
-            ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-            ctx_view.types = checked_types.view();
-            ctx.instantiation = TypeInstantiationContext.init(allocator, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-            ctx.resolves_enclosing_variables = false;
-            ctx.relation_variables = null;
-            ctx.constructing_scheme_vars = &.{};
-            // An evidence chain without frames: no scope is read.
-            ctx.evidence = .{ .scope = undefined };
-            defer ctx.instantiation.deinit();
+            try lowering.seedView(checked_types.view());
+            var ctx = try lowering.bodyContext(graph);
+            defer ctx.deinit();
             _ = ctx.instNode(recursive) catch |err| {
                 try std.testing.expect(!ctx.instantiation.node_map.contains(recursive));
                 return err;
@@ -74554,11 +74530,12 @@ test "issue 11362: allocation failure removes active checked instantiation marke
 
 test "checked type instantiation scopes have exact isolated identities" {
     var diagnostics: Diagnostics = .{};
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.next_instantiation_scope = 0;
-    builder.diagnostics = &diagnostics;
-    builder.active_spec_job_diagnostics = null;
+    var program = Ast.Program.init(std.testing.allocator);
+    defer program.deinit();
+    var lowering: TestLowering = undefined;
+    try lowering.init(std.testing.allocator, &program, .{ .diagnostics = &diagnostics });
+    defer lowering.deinit();
+    const builder = &lowering.builder;
 
     const module_bytes = @as([32]u8, @splat(7));
     var first = TypeInstantiationContext.init(std.testing.allocator, builder.allocateInstantiationScope(), module_bytes);
@@ -74582,11 +74559,10 @@ test "specialization shard diagnostics remain private until coordinator commit" 
 
     var coordinator: Diagnostics = .{};
     var shard: SpecJobDiagnostics = .{};
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.allocator = allocator;
-    builder.program = &program;
-    builder.diagnostics = &coordinator;
+    var lowering: TestLowering = undefined;
+    try lowering.init(allocator, &program, .{ .diagnostics = &coordinator });
+    defer lowering.deinit();
+    const builder = &lowering.builder;
     builder.active_spec_job_diagnostics = &shard;
 
     builder.countBodyDiagnostic("body_contexts_created");
@@ -74674,39 +74650,13 @@ fn testLazyCheckedInstantiationAliases(gpa: Allocator) (Allocator.Error || error
     } });
     var program = Ast.Program.init(std.testing.allocator);
     defer program.deinit();
-    var builder: Builder = undefined;
-    builder.program = &program;
-    builder.app_module_identity = null;
-    builder.next_instantiation_scope = 0;
-    builder.allocator = gpa;
-    builder.node_map_pool = .empty;
-    builder.node_map_pool_outstanding = 0;
-    defer {
-        for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-        builder.node_map_pool.deinit(gpa);
-    }
-    builder.timing = null;
-    builder.diagnostics = &diagnostics;
-    builder.active_spec_job_diagnostics = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = gpa;
-    ctx.builder = &builder;
-    ctx.graph = graph;
-    var ctx_view: ModuleViewData = undefined;
-    ctx.view = &ctx_view;
-    ctx_view.key = .{ .bytes = @splat(0) };
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{ .diagnostics = &diagnostics });
+    defer lowering.deinit();
     // The program seeds this module as its lowering input, as the coordinator does.
-    ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-    ctx_view.types = checked_types.view();
-    ctx.instantiation = TypeInstantiationContext.init(gpa, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-    ctx.resolves_enclosing_variables = false;
-    ctx.relation_variables = null;
-    ctx.constructing_scheme_vars = &.{};
-    // An evidence chain without frames: no scope is read.
-    ctx.evidence = .{ .scope = undefined };
-    defer ctx.instantiation.deinit();
+    try lowering.seedView(checked_types.view());
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
     errdefer {
         var entries = ctx.instantiation.node_map.valueIterator();
         while (entries.next()) |entry| std.debug.assert(entry.* == .node);
@@ -74777,39 +74727,13 @@ test "issue 11362: checked instantiation allocates placeholders only for recursi
 
     var program = Ast.Program.init(gpa);
     defer program.deinit();
-    var builder: Builder = undefined;
-    builder.program = &program;
-    builder.app_module_identity = null;
-    builder.next_instantiation_scope = 0;
-    builder.allocator = gpa;
-    builder.node_map_pool = .empty;
-    builder.node_map_pool_outstanding = 0;
-    defer {
-        for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-        builder.node_map_pool.deinit(gpa);
-    }
-    builder.timing = null;
-    builder.diagnostics = null;
-    builder.active_spec_job_diagnostics = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = gpa;
-    ctx.builder = &builder;
-    ctx.graph = graph;
-    var ctx_view: ModuleViewData = undefined;
-    ctx.view = &ctx_view;
-    ctx_view.key = .{ .bytes = @splat(0) };
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
     // The program seeds this module as its lowering input, as the coordinator does.
-    ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-    ctx_view.types = checked_types.view();
-    ctx.instantiation = TypeInstantiationContext.init(gpa, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-    ctx.resolves_enclosing_variables = false;
-    ctx.relation_variables = null;
-    ctx.constructing_scheme_vars = &.{};
-    // An evidence chain without frames: no scope is read.
-    ctx.evidence = .{ .scope = undefined };
-    defer ctx.instantiation.deinit();
+    try lowering.seedView(checked_types.view());
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
 
     const pair_node = try ctx.instNode(pair);
     try std.testing.expectEqual(@as(u64, 2), diagnostics.nodes_created);
@@ -74853,39 +74777,13 @@ test "issue 11362: allocation failure removes checked instantiation markers" {
             defer graph.destroy();
             var program = Ast.Program.init(std.testing.allocator);
             defer program.deinit();
-            var builder: Builder = undefined;
-            builder.program = &program;
-            builder.app_module_identity = null;
-            builder.next_instantiation_scope = 0;
-            builder.allocator = allocator;
-            builder.node_map_pool = .empty;
-            builder.node_map_pool_outstanding = 0;
-            defer {
-                for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-                builder.node_map_pool.deinit(allocator);
-            }
-            builder.timing = null;
-            builder.diagnostics = null;
-            builder.active_spec_job_diagnostics = null;
-            var ctx: BodyContext = undefined;
-            builder.task_storage = .{};
-            defer builder.task_storage.deinit(ctx.allocator);
-            ctx.allocator = allocator;
-            ctx.builder = &builder;
-            ctx.graph = graph;
-            var ctx_view: ModuleViewData = undefined;
-            ctx.view = &ctx_view;
-            ctx_view.key = .{ .bytes = @splat(0) };
+            var lowering: TestLowering = undefined;
+            try lowering.init(allocator, &program, .{});
+            defer lowering.deinit();
             // The program seeds this module as its lowering input, as the coordinator does.
-            ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-            ctx_view.types = view;
-            ctx.instantiation = TypeInstantiationContext.init(allocator, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-            ctx.resolves_enclosing_variables = false;
-            ctx.relation_variables = null;
-            ctx.constructing_scheme_vars = &.{};
-            // An evidence chain without frames: no scope is read.
-            ctx.evidence = .{ .scope = undefined };
-            defer ctx.instantiation.deinit();
+            try lowering.seedView(view);
+            var ctx = try lowering.bodyContext(graph);
+            defer ctx.deinit();
             _ = ctx.instNode(root) catch |err| {
                 std.debug.assert(ctx.instantiation.node_map.get(root) == null);
                 return err;
@@ -74944,39 +74842,13 @@ fn testLazyCheckedInstantiation(allocator: Allocator, recursive: bool) (Allocato
     graph.setDiagnostics(&diagnostics.graph);
     var program = Ast.Program.init(gpa);
     defer program.deinit();
-    var builder: Builder = undefined;
-    builder.program = &program;
-    builder.app_module_identity = null;
-    builder.next_instantiation_scope = 0;
-    builder.allocator = gpa;
-    builder.node_map_pool = .empty;
-    builder.node_map_pool_outstanding = 0;
-    defer {
-        for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-        builder.node_map_pool.deinit(gpa);
-    }
-    builder.timing = null;
-    builder.diagnostics = &diagnostics;
-    builder.active_spec_job_diagnostics = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = allocator;
-    ctx.builder = &builder;
-    ctx.graph = graph;
-    var ctx_view: ModuleViewData = undefined;
-    ctx.view = &ctx_view;
-    ctx_view.key = .{ .bytes = @splat(0) };
+    var lowering: TestLowering = undefined;
+    try lowering.init(allocator, &program, .{ .diagnostics = &diagnostics });
+    defer lowering.deinit();
     // The program seeds this module as its lowering input, as the coordinator does.
-    ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-    ctx_view.types = checked_types.view();
-    ctx.instantiation = TypeInstantiationContext.init(allocator, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-    ctx.resolves_enclosing_variables = false;
-    ctx.relation_variables = null;
-    ctx.constructing_scheme_vars = &.{};
-    // An evidence chain without frames: no scope is read.
-    ctx.evidence = .{ .scope = undefined };
-    defer ctx.instantiation.deinit();
+    try lowering.seedView(checked_types.view());
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
     errdefer {
         var entries = ctx.instantiation.node_map.valueIterator();
         while (entries.next()) |entry| std.debug.assert(entry.* == .node);
@@ -75073,39 +74945,13 @@ test "lazy checked instantiation allocates only recursive placeholders and clear
 
             var program = Ast.Program.init(std.testing.allocator);
             defer program.deinit();
-            var builder: Builder = undefined;
-            builder.program = &program;
-            builder.app_module_identity = null;
-            builder.next_instantiation_scope = 0;
-            builder.allocator = gpa;
-            builder.node_map_pool = .empty;
-            builder.node_map_pool_outstanding = 0;
-            defer {
-                for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-                builder.node_map_pool.deinit(gpa);
-            }
-            builder.timing = null;
-            builder.diagnostics = null;
-            builder.active_spec_job_diagnostics = null;
-            var ctx: BodyContext = undefined;
-            builder.task_storage = .{};
-            defer builder.task_storage.deinit(ctx.allocator);
-            ctx.allocator = gpa;
-            ctx.builder = &builder;
-            ctx.graph = graph;
-            var ctx_view: ModuleViewData = undefined;
-            ctx.view = &ctx_view;
-            ctx_view.key = .{ .bytes = @splat(0) };
+            var lowering: TestLowering = undefined;
+            try lowering.init(gpa, &program, .{});
+            defer lowering.deinit();
             // The program seeds this module as its lowering input, as the coordinator does.
-            ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-            ctx_view.types = checked_types.view();
-            ctx.instantiation = TypeInstantiationContext.init(gpa, builder.allocateInstantiationScope(), ctx.view.key.bytes);
-            ctx.resolves_enclosing_variables = false;
-            ctx.relation_variables = null;
-            ctx.constructing_scheme_vars = &.{};
-            // An evidence chain without frames: no scope is read.
-            ctx.evidence = .{ .scope = undefined };
-            defer ctx.instantiation.deinit();
+            try lowering.seedView(checked_types.view());
+            var ctx = try lowering.bodyContext(graph);
+            defer ctx.deinit();
             errdefer {
                 var entries = ctx.instantiation.node_map.valueIterator();
                 while (entries.next()) |entry| std.debug.assert(entry.* == .node);
@@ -75152,36 +74998,13 @@ test "lazy checked placeholders obey closed and innermost declaration scopes" {
     // This test exercises only scope allocation and checked-node lookup.
     var program = Ast.Program.init(gpa);
     defer program.deinit();
-    var builder: Builder = undefined;
-    builder.program = &program;
-    builder.app_module_identity = null;
-    builder.next_instantiation_scope = 0;
-    builder.allocator = gpa;
-    builder.node_map_pool = .empty;
-    builder.node_map_pool_outstanding = 0;
-    defer {
-        for (builder.node_map_pool.items) |*node_map| node_map.deinit();
-        builder.node_map_pool.deinit(gpa);
-    }
-    builder.diagnostics = null;
-    builder.active_spec_job_diagnostics = null;
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.graph = graph;
-    var ctx_view: ModuleViewData = undefined;
-    ctx.view = &ctx_view;
-    ctx_view.key = .{ .bytes = @splat(0) };
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
     // The program seeds this module as its lowering input, as the coordinator does.
-    ctx_view.lowering_module = try program.addLoweringModule(ctx_view.key);
-    ctx_view.types = checked_types.view();
-    ctx.instantiation = TypeInstantiationContext.init(gpa, builder.allocateInstantiationScope(), @splat(0));
-    ctx.resolves_enclosing_variables = false;
-    ctx.relation_variables = null;
-    ctx.constructing_scheme_vars = &.{};
-    // An evidence chain without frames: no scope is read.
-    ctx.evidence = .{ .scope = undefined };
-    defer ctx.instantiation.deinit();
+    try lowering.seedView(checked_types.view());
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
     var outer = InstantiatingNodeMap.init(gpa);
     defer outer.deinit();
     var inner = InstantiatingNodeMap.init(gpa);
@@ -75279,19 +75102,13 @@ test "issue 11453: direct alias lowering shares runtime types without wrapper al
     var program = Ast.Program.init(gpa);
     defer program.deinit();
     // Exercise the direct producer without constructing an instantiation graph.
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.allocator = gpa;
-    builder.program = &program;
-    builder.force_program_type_destination = false;
-    builder.active_body_draft = null;
-    builder.type_cache = .empty;
-    defer builder.type_cache.deinit(gpa);
-    var views: [1]ModuleViewData = undefined;
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
+    const builder = &lowering.builder;
+    var views = [1]ModuleViewData{lowering.view_data};
     const view = &views[0];
     builder.borrowed_module_views = &views;
-    builder.module_index = @TypeOf(builder.module_index).init(gpa);
-    defer builder.module_index.deinit();
     view.key = .{};
     try builder.module_index.put(view.key.bytes, .root);
     view.names = &source_names;
@@ -75379,32 +75196,21 @@ test "issue 11453: stored aliases preserve sharing recursion and nominal backing
     defer program.deinit();
     const graph = try InstGraph.create(gpa, &program.types, &program.names);
     defer graph.destroy();
-    var draft = BodyDraftStore.init(gpa);
-    defer draft.deinit();
-    draft.mutable_graph_names = &program.names;
-    var builder: Builder = undefined;
-    builder.app_module_identity = null;
-    builder.allocator = gpa;
-    builder.program = &program;
-    builder.const_type_cache = .empty;
-    defer builder.const_type_cache.deinit(gpa);
-    var ctx: BodyContext = undefined;
-    builder.task_storage = .{};
-    defer builder.task_storage.deinit(ctx.allocator);
-    ctx.allocator = gpa;
-    ctx.builder = &builder;
-    ctx.graph = graph;
-    ctx.draft = &draft;
-    var views: [1]ModuleViewData = undefined;
+    var lowering: TestLowering = undefined;
+    try lowering.init(gpa, &program, .{});
+    defer lowering.deinit();
+    const builder = &lowering.builder;
+    lowering.draft.mutable_graph_names = &program.names;
+    var views = [1]ModuleViewData{lowering.view_data};
     const view = &views[0];
     view.key = module_key;
     view.names = &source_names;
     view.types = checked_types.view();
     view.const_store = &constants;
     builder.borrowed_module_views = &views;
-    builder.module_index = @TypeOf(builder.module_index).init(gpa);
-    defer builder.module_index.deinit();
     try builder.module_index.put(view.key.bytes, .root);
+    var ctx = try lowering.bodyContext(graph);
+    defer ctx.deinit();
 
     const result = try ctx.lowerConstCaptureType(view, root);
     const items = program.types.span(program.types.get(result).tuple);
@@ -75668,14 +75474,16 @@ test "stored capture witnesses preserve producer and instantiation identity" {
 
 test "module identity index retains first current view and rejects absent owners" {
     const allocator = std.testing.allocator;
+    var program = Ast.Program.init(allocator);
+    defer program.deinit();
+    var lowering: TestLowering = undefined;
+    try lowering.init(allocator, &program, .{});
+    defer lowering.deinit();
+    const builder = &lowering.builder;
     // Only the explicit owner identity participates in this immutable index.
-    var views: [4]ModuleViewData = undefined;
+    var views: [4]ModuleViewData = @splat(lowering.view_data);
     for (&views, [_]u8{ 1, 2, 1, 3 }) |*view, byte| view.module_identity.stable_hash = @splat(byte);
-    var builder: Builder = undefined;
-    builder.allocator = allocator;
     builder.borrowed_module_views = &views;
-    builder.module_identity_index = .empty;
-    defer builder.module_identity_index.deinit(allocator);
     try builder.seedModuleIdentityIndex();
     try std.testing.expect(builder.moduleForIdentityHash(&@as([32]u8, @splat(1))).? == &views[0]);
     try std.testing.expect(builder.moduleForIdentityHash(&@as([32]u8, @splat(2))).? == &views[1]);

@@ -2698,8 +2698,6 @@ test "interface summaries relocate across bodies and executor lanes" {
     defer second.deinit(allocator);
     try std.testing.expect(first_diagnostics.specialization.interface_summary_hits > 0);
     try std.testing.expect(first_diagnostics.specialization.interface_summary_expansions > 0);
-    try std.testing.expectEqual(std.debug.runtime_safety, first_diagnostics.specialization.interface_summary_verifications > 0);
-    try std.testing.expectEqual(std.debug.runtime_safety, second_diagnostics.specialization.interface_summary_verifications > 0);
     try std.testing.expect(first.mono.types.digest_stats == null);
     const first_specs = first.mono.specsView();
     const second_specs = second.mono.specsView();
@@ -3565,6 +3563,58 @@ test "single-use block helper nested in a multi-use wrapper is not duplicated" {
         \\    wrapper(a, 2)
         \\}
     , "helper", false);
+}
+
+test "a wrapper selected as a function value does not duplicate its single-use callee" {
+    const allocator = std.testing.allocator;
+    var source = try lowerModule(allocator,
+        \\word : U64 -> Str
+        \\word = |n| if n == 42 "yes" else "no"
+        \\wrap = |n| word(n)
+        \\other = |_| "other"
+        \\main : U64 -> Str
+        \\main = |n| {
+        \\    f = if n > 9 wrap else other
+        \\    Str.concat(f(n), f(n + 1))
+        \\}
+    , .wrappers);
+    defer source.deinit(allocator);
+
+    // `word` has one direct caller, but `wrap` can be selected at both calls
+    // of `f`. Its comparison must not be copied into both dispatches.
+    const store = &source.lowered.lir_result.store;
+    var comparisons: usize = 0;
+    for (0..store.procSpecCount()) |i| {
+        const proc: LIR.LirProcSpecId = @fromBackingInt(@as(u32, @intCast(i)));
+        if (store.getProcSpecImmediate(proc).body == .none) continue;
+        const stmts = try procStmts(allocator, store, proc);
+        defer allocator.free(stmts);
+        for (stmts) |id| {
+            const stmt = store.getCFStmtImmediate(id);
+            if (stmt.* == .assign_low_level and stmt.assign_low_level.op == .num_is_eq) comparisons += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), comparisons);
+}
+
+test "inlined helper locals do not leak between callable specializations" {
+    // The two curried calls enter the same source body. Its local record
+    // holds a callable with a different captured value in each copy.
+    _ = try lowerAndRunUserIter(
+        \\make = |f, captured| {
+        \\    invoke = |n| f(n, captured)
+        \\    bound = { invoke: invoke }
+        \\    |n| (bound.invoke)(n)
+        \\}
+        \\main : I64
+        \\main = {
+        \\    left = make(|x, n| x + n, 3.I64)
+        \\    right = make(|x, s| if s == "ab" x * 2 else 0, "ab")
+        \\    result = left(4) * 10 + right(4)
+        \\    dbg result
+        \\    result
+        \\}
+    , .wrappers, "78");
 }
 
 test "bodies on interlocking call cycles are decided alike in every definition order" {
@@ -5282,6 +5332,65 @@ test "issue 12976 a function returning a parameter its closure also captures low
         }
         try runtime_env.checkForLeaks();
     }
+}
+
+test "a body inlined at two instances of its group in one procedure binds its locals afresh each time" {
+    // `go` is called once with each of two closures, so it has one instance
+    // per lambda set and each instance is a single-use body that `main`
+    // inlines. Both inlined copies read the same lifted body, so `call` in
+    // the second copy is a different value with a different callable layout
+    // from `call` in the first.
+    const allocator = std.testing.allocator;
+    const source =
+        \\Step := [Step((U64 -> Step))]
+        \\Cols : { items : List(U64), other : List(U64) }
+        \\nested : Cols -> Step
+        \\nested = |cols0| {
+        \\    held = { cols: cols0 }
+        \\    Step.Step(|i| {
+        \\        { items, other } = held.cols
+        \\        nested({ items: items.set(i, i) ?? crash "items", other })
+        \\    })
+        \\}
+        \\flat : Cols -> Step
+        \\flat = |cols0| {
+        \\    held = { items: cols0.items, other: cols0.other }
+        \\    Step.Step(|i| {
+        \\        { items, other } = held
+        \\        flat({ items: items.set(i, i) ?? crash "items", other })
+        \\    })
+        \\}
+        \\go : Step -> U64
+        \\go = |start| {
+        \\    Step.Step(call) = [start].get(0) ?? crash "kid"
+        \\    _ = call(1)
+        \\    1
+        \\}
+        \\main : U64 -> U64
+        \\main = |n| {
+        \\    cols = { items: List.repeat(0, n), other: List.repeat(0, n) }
+        \\    go(nested(cols)) + go(flat(cols)) + n
+        \\}
+    ;
+    var lowered = try lowerModule(allocator, source, .wrappers);
+    defer lowered.deinit(allocator);
+    var runtime_env = eval.RuntimeHostEnv.init(allocator);
+    defer runtime_env.deinit();
+    {
+        const result = &lowered.lowered.lir_result;
+        var static_strings = try eval.Interpreter.buildStaticStrings(allocator, &result.store);
+        defer static_strings.deinit();
+        var interpreter = try eval.Interpreter.init(allocator, &result.store, &result.layouts, static_strings.view(), runtime_env.get_ops());
+        defer interpreter.deinit();
+        var n: u64 = 5;
+        const evaluated = try interpreter.eval(.{
+            .proc_id = try rootProc(&lowered.lowered),
+            .arg_layouts = &.{.u64},
+            .arg_ptr = @ptrCast(&n),
+        });
+        try std.testing.expectEqual(@as(u64, 7), evaluated.value.read(u64));
+    }
+    try runtime_env.checkForLeaks();
 }
 
 test "issue 13208 a record update keeps an iterator field passed through an annotated public Iter" {
