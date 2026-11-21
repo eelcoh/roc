@@ -1,0 +1,18 @@
+app [main!] { pf: platform "../../../platforms/cli/main.roc" }
+
+import pf.Stdout
+import pf.Clock
+import pf.Random
+
+
+-- Says hello from inside a Hermit unikernel, and shows that the clock,
+-- randomness and the list builtins work there.
+main! = fn () ->
+    Stdout.line! "Hallo vanuit een punk-unikernel!"
+    squares = List.range 1 10 |> List.map (fn n -> n * n)
+    Stdout.line! "Kwadraten: ${squares |> List.map String.fromInt |> String.join ", "}"
+    Stdout.line! "Som: ${String.fromInt (List.sum squares)}"
+    t = Clock.now! ()
+    Stdout.line! "Klok (ms sinds 1970): ${String.fromInt t}"
+    r = Random.u64! ()
+    Stdout.line! "Toeval: ${U64.to_str r}"
