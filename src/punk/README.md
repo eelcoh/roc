@@ -24,6 +24,25 @@ type Shape = Circle F64 | Rect F64 F64  Shape := [Circle(F64), Rect(F64, F64)]
 - `main.zig`: the `punk2roc` command line tool.
 - `test.zig`: translation tests.
 
+## Zig
+
+Building needs exactly Zig 0.17.1 (`minimum_zig_version` in
+`build.zig.zon`). Another version fails at once, for example with
+`invalid builtin function: '@backingInt'`. Check with `zig version`; on macOS
+(Apple silicon):
+
+```
+curl -LO https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz
+tar xf zig-aarch64-macos-0.17.1.tar.xz
+export PATH="$PWD/zig-aarch64-macos-0.17.1:$PATH"
+zig version
+```
+
+or `pip install ziglang==0.17.1` and `python3 -m ziglang build roc`.
+Homebrew's `zig` is often another version. A shell script (`sh ...`) can
+find another `zig` than your interactive shell, because it does not read
+`~/.zshrc`; `test/punk/setup.sh` checks the version first.
+
 ## In the compiler
 
 The compiler translates `.punk` files as it reads them (`CoreCtx.readFile`),
