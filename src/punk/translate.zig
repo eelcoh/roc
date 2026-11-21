@@ -190,6 +190,57 @@ fn fail(diag: *Diagnostic, line: u32, col: u32, message: []const u8) error{Parse
 }
 
 /// Split punkroc source into tokens, keeping layout information.
+/// The text between the quotes of a multi-line string (`"""..."""`) as one
+/// ordinary string literal, quotes included. When the string starts on the
+/// line after the opening quotes and the closing quotes stand on a line of
+/// their own, those two line breaks are left out, and so is the indentation
+/// of the closing quotes on every line:
+///
+///     example =
+///         """
+///         3   4
+///         4   3
+///         """
+///
+/// is "3   4\n4   3". Otherwise the text is taken as it is. Escapes and
+/// `${...}` work as in other strings.
+fn multilineString(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
+    var text = body;
+    var indent: []const u8 = "";
+    const last_nl = std.mem.findScalarLast(u8, text, '\n');
+    if (last_nl != null and std.mem.startsWith(u8, std.mem.trimStart(u8, text, " \r"), "\n") and
+        std.mem.trim(u8, text[last_nl.? + 1 ..], " ").len == 0)
+    {
+        indent = text[last_nl.? + 1 ..];
+        const first_nl = std.mem.findScalar(u8, text, '\n').?;
+        text = if (first_nl < last_nl.?) text[first_nl + 1 .. last_nl.?] else "";
+    }
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(a, '"');
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (lines.next()) |raw_line| {
+        if (!first) try out.appendSlice(a, "\\n");
+        first = false;
+        const l = std.mem.trimEnd(u8, raw_line, "\r");
+        const content = if (std.mem.startsWith(u8, l, indent)) l[indent.len..] else std.mem.trimStart(u8, l, " ");
+        var k: usize = 0;
+        while (k < content.len) : (k += 1) {
+            const ch = content[k];
+            if (ch == '\\' and k + 1 < content.len) {
+                try out.appendSlice(a, content[k .. k + 2]);
+                k += 1;
+            } else if (ch == '"') {
+                try out.appendSlice(a, "\\\"");
+            } else {
+                try out.append(a, ch);
+            }
+        }
+    }
+    try out.append(a, '"');
+    return out.items;
+}
+
 pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
     var toks: std.ArrayList(Token) = .empty;
     var comments: std.ArrayList([]const u8) = .empty;
@@ -263,6 +314,11 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
         var tag: Tag = undefined;
         var text_start = i;
         var text_end = i;
+        // A multi-line string becomes one Roc string; its token text is made
+        // here, and the lines it spans are counted after the token.
+        var made_text: ?[]const u8 = null;
+        var lines_inside: u32 = 0;
+        var last_line_start: usize = 0;
 
         if (i >= src.len) {
             tag = .eof;
@@ -320,40 +376,51 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
                 i = j;
             } else if (c == '"') {
                 if (i + 2 < src.len and src[i + 1] == '"' and src[i + 2] == '"') {
-                    return fail(diag, line, col, "multi-line strings (\"\"\") are not supported yet");
-                }
-                var j = i + 1;
-                var depth: u32 = 0; // depth of ${ ... } nesting
-                while (true) {
-                    if (j >= src.len or (src[j] == '\n' and depth == 0)) return fail(diag, line, col, "unterminated string");
-                    const d = src[j];
-                    if (depth == 0) {
-                        if (d == '\\') {
-                            j += 2;
-                            continue;
-                        }
-                        if (d == '"') break;
-                        if (d == '$' and j + 1 < src.len and src[j + 1] == '{') {
-                            depth = 1;
-                            j += 2;
-                            continue;
-                        }
-                    } else {
-                        if (d == '{') depth += 1;
-                        if (d == '}') depth -= 1;
-                        if (d == '"') {
-                            // nested string inside interpolation
-                            j += 1;
-                            while (j < src.len and src[j] != '"') : (j += 1) {
-                                if (src[j] == '\\') j += 1;
+                    const body_start = i + 3;
+                    const close = std.mem.findPos(u8, src, body_start, "\"\"\"") orelse
+                        return fail(diag, line, col, "unterminated multi-line string; end it with \"\"\"");
+                    for (src[body_start..close], body_start..) |ch, k| if (ch == '\n') {
+                        lines_inside += 1;
+                        last_line_start = k + 1;
+                    };
+                    made_text = try multilineString(a, src[body_start..close]);
+                    tag = .string;
+                    i = close + 3;
+                    text_end = i;
+                } else {
+                    var j = i + 1;
+                    var depth: u32 = 0; // depth of ${ ... } nesting
+                    while (true) {
+                        if (j >= src.len or (src[j] == '\n' and depth == 0)) return fail(diag, line, col, "unterminated string");
+                        const d = src[j];
+                        if (depth == 0) {
+                            if (d == '\\') {
+                                j += 2;
+                                continue;
+                            }
+                            if (d == '"') break;
+                            if (d == '$' and j + 1 < src.len and src[j + 1] == '{') {
+                                depth = 1;
+                                j += 2;
+                                continue;
+                            }
+                        } else {
+                            if (d == '{') depth += 1;
+                            if (d == '}') depth -= 1;
+                            if (d == '"') {
+                                // nested string inside interpolation
+                                j += 1;
+                                while (j < src.len and src[j] != '"') : (j += 1) {
+                                    if (src[j] == '\\') j += 1;
+                                }
                             }
                         }
+                        j += 1;
                     }
-                    j += 1;
+                    tag = .string;
+                    text_end = j + 1;
+                    i = j + 1;
                 }
-                tag = .string;
-                text_end = j + 1;
-                i = j + 1;
             } else if (c == '\'') {
                 var j = i + 1;
                 while (j < src.len and src[j] != '\'' and src[j] != '\n') : (j += 1) {
@@ -368,7 +435,9 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
                     tag = .double_dot;
                     text_end = i + 2;
                     i += 2;
-                } else if (!space_before and i + 1 < src.len and std.ascii.isAlphanumeric(src[i + 1])) {
+                } else if (i + 1 < src.len and (std.ascii.isLower(src[i + 1]) or std.ascii.isDigit(src[i + 1]) or (!space_before and std.ascii.isAlphanumeric(src[i + 1])))) {
+                    // `.name` right after a value is field access; with a
+                    // space before it, it is an accessor function (`List.map .name`).
                     var j = i + 1;
                     while (j < src.len and isIdentChar(src[j])) j += 1;
                     tag = .dot_field;
@@ -418,7 +487,7 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
 
         try toks.append(a, .{
             .tag = tag,
-            .text = src[text_start..text_end],
+            .text = made_text orelse src[text_start..text_end],
             .start = @intCast(tok_start),
             .line = line,
             .col = col,
@@ -428,6 +497,10 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
             .comments = try comments.toOwnedSlice(a),
         });
         if (tag == .eof) break;
+        if (lines_inside > 0) {
+            line += lines_inside;
+            line_start = last_line_start;
+        }
         last_tok_line = line;
         newlines_since_tok = 0;
         space_before = false;
@@ -896,10 +969,12 @@ const Parser = struct {
         const t = p.tok();
         return switch (t.tag) {
             .lower, .upper, .qlower, .int, .float, .string, .char, .lparen, .lbrack, .lbrace, .underscore => true,
+            // `List.map .name people`: an accessor function as an argument
+            .dot_field => t.space_before,
             // `f -1` passes a negative number; `f - 1` subtracts.
             .op => std.mem.eql(u8, t.text, "-") and t.space_before and !p.peekAt(1).space_before and
                 (p.peekAt(1).tag == .int or p.peekAt(1).tag == .float or p.peekAt(1).tag == .lower),
-            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
+            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
         };
     }
 
@@ -954,9 +1029,19 @@ const Parser = struct {
             .lparen => try p.parseParenExpr(),
             .lbrack => try p.parseListExpr(),
             .lbrace => try p.parseRecordExpr(),
-            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => return p.errAt(t, "expected an expression but found '{s}'", .{describe(t)}),
+            // `.name` on its own is Elm's accessor function: `fn r -> r.name`
+            .dot_field => blk: {
+                _ = p.advance();
+                const param = try p.new(Pattern, .{ .ident = "punkRecord" });
+                const target = try p.new(Expr, .{ .ident = "punkRecord" });
+                const body = try p.new(Block, .{ .stmts = &.{}, .result = try p.new(Expr, .{ .field = .{ .target = target, .name = t.text } }) });
+                const params = try p.a.alloc(*Pattern, 1);
+                params[0] = param;
+                break :blk try p.new(Expr, .{ .paren = try p.new(Expr, .{ .lambda = .{ .params = params, .body = body } }) });
+            },
+            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => return p.errAt(t, "expected an expression but found '{s}'", .{describe(t)}),
         };
-        while (p.tok().tag == .dot_field) {
+        while (p.tok().tag == .dot_field and !p.tok().space_before) {
             const f = p.advance();
             e = try p.new(Expr, .{ .field = .{ .target = e, .name = f.text } });
         }
@@ -1560,7 +1645,7 @@ const Emitter = struct {
             }
             try e.comments(item.comments);
             switch (item.kind) {
-                .raw => |r| try e.w(r),
+                .raw => |r| if (parseImport(r) != null) try e.emitImport(r) else try e.w(r),
                 .anno => |an| {
                     try e.w(try snake(e.a, an.name));
                     try e.w(" : ");
@@ -1826,6 +1911,43 @@ const Emitter = struct {
         }
     }
 
+    /// Writes an import line for Roc. The exposing list may use Elm's
+    /// parentheses (`exposing (Grid, at, Shape(..))`); Roc wants brackets,
+    /// snake_case names, and no `(..)` after a type.
+    fn emitImport(e: *Emitter, raw: []const u8) Error!void {
+        const span = exposingSpan(raw) orelse return e.w(raw);
+        try e.w(raw[0..span.open]);
+        try e.w("[");
+        var names = std.mem.tokenizeAny(u8, raw[span.open + 1 .. span.close], ", \t\r\n");
+        var first = true;
+        while (names.next()) |n| {
+            const name = if (std.mem.endsWith(u8, n, "(..)")) n[0 .. n.len - 4] else n;
+            if (name.len == 0) continue;
+            if (!first) try e.w(", ");
+            first = false;
+            try e.w(if (std.ascii.isLower(name[0])) try snake(e.a, name) else name);
+        }
+        try e.w("]");
+        if (span.close < raw.len) try e.w(raw[span.close + 1 ..]);
+    }
+
+    /// Where the list of `exposing [..]` or `exposing (..)` starts and ends
+    /// (the positions of its brackets; a `(..)` after a type is skipped).
+    fn exposingSpan(raw: []const u8) ?struct { open: usize, close: usize } {
+        const at = std.mem.find(u8, raw, "exposing") orelse return null;
+        const open = std.mem.findAnyPos(u8, raw, at, "[(") orelse return null;
+        const close_char: u8 = if (raw[open] == '(') ')' else ']';
+        var depth: usize = 0;
+        for (raw[open..], open..) |c, i| {
+            if (c == raw[open]) depth += 1;
+            if (c == close_char) {
+                depth -= 1;
+                if (depth == 0) return .{ .open = open, .close = i };
+            }
+        }
+        return .{ .open = open, .close = raw.len };
+    }
+
     const Package = struct { alias: []const u8, path: []const u8 };
 
     /// The packages of an app header: `{ pf: platform "../pf/main.roc", json: "https://..." }`.
@@ -1881,11 +2003,7 @@ const Emitter = struct {
             if (words.next()) |name| alias = name;
         };
         var exposing: ?[]const u8 = null;
-        if (std.mem.find(u8, rest, "exposing")) |at| {
-            const open = std.mem.findAnyPos(u8, rest, at, "[(") orelse return null;
-            const close = std.mem.findAnyPos(u8, rest, open, "])") orelse rest.len;
-            exposing = rest[open + 1 .. close];
-        }
+        if (exposingSpan(rest)) |span| exposing = rest[span.open + 1 .. span.close];
         return .{ .package = package, .module = module, .alias = alias, .exposing = exposing };
     }
 
@@ -2284,6 +2402,14 @@ const Emitter = struct {
                     if (callee.builtin and callee.f.order != .none and callee.f.arity >= 2) {
                         return e.emitCall(x, &.{});
                     }
+                }
+                // `Set.empty` and `Dict.empty` are values in Elm and
+                // functions without arguments in Roc.
+                if (std.mem.findScalar(u8, name, '.') != null) {
+                    if (stdlib.lookup(stdlib.rocName(try snakeQualified(e.a, name)))) |f| if (f.arity == 0) {
+                        try e.emitIdent(name);
+                        return e.w("()");
+                    };
                 }
                 try e.emitIdent(name);
             },

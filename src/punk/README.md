@@ -154,6 +154,31 @@ arguments at once, as in Roc. The switch `rotate_roc_modules` in
 punkroc modules `Math` and `Shape`, the Roc module `Text.roc`, and
 `Report.roc`, a Roc module that uses `Math.punk`.
 
-Known gaps: multi-line strings, comments inside expressions (only comments
-before definitions and statements are kept), `::` list patterns, operator
-sections such as `(+)`.
+## Smaller Elm habits
+
+- **Accessor functions.** `.name` on its own is `fn r -> r.name`:
+  `List.map .name people`, `List.map .0 pairs`.
+- **`Result.andThen`** chains steps that may fail (Roc's new `Try.and_then`):
+  `grid |> List.get row |> Result.andThen (List.get col)`.
+- **`Set.empty` and `Dict.empty`** are values, as in Elm (Roc's `Set.empty()`).
+- **`import Grid exposing (Cells, at)`** takes Elm's parentheses (and
+  `Shape(..)`) as well as Roc's brackets.
+- **Multi-line strings.** Between `"""` and `"""`. When the text starts on the
+  line after the opening quotes and the closing quotes stand on a line of
+  their own, those line breaks go, and so does the indentation of the closing
+  quotes, so puzzle input can be pasted indented:
+
+  ```
+  example =
+      """
+      3   4
+      4   3
+      """
+  ```
+
+  is `"3   4\n4   3"`.
+
+`examples/punk/aoc2024/` has several Advent of Code days written this way.
+
+Known gaps: comments inside expressions (only comments before definitions
+and statements are kept), `::` list patterns, operator sections such as `(+)`.

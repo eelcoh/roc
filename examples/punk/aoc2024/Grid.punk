@@ -1,0 +1,47 @@
+module Grid exposing (Cells, Point, parse, at, points, find, add, scale)
+
+{-| A grid of characters, as read from an Advent of Code puzzle.
+Rows and columns start at 0; outside the grid every cell is ' '.
+-}
+
+type alias Cells = List (List U8)
+
+type alias Point = { row : I64, col : I64 }
+
+parse : Str -> Cells
+parse = fn input ->
+    input
+        |> Str.splitOn "\n"
+        |> List.map Str.toUtf8
+
+at : Cells -> Point -> U8
+at = fn grid, { row, col } ->
+    if row < 0 || col < 0 then
+        ' '
+    else
+        grid
+            |> List.get (I64.toU64Wrap row)
+            |> Result.andThen (List.get (I64.toU64Wrap col))
+            |> Result.withDefault ' '
+
+-- Every point of the grid, row by row
+points : Cells -> List Point
+points = fn grid ->
+    grid
+        |> List.mapWithIndex (fn line, row -> List.mapWithIndex (fn _, col -> { row = U64.toI64Wrap row, col = U64.toI64Wrap col }) line)
+        |> List.join
+
+-- The first point that holds `char`
+find : U8 -> Cells -> Result Point _
+find = fn char, grid ->
+    grid
+        |> points
+        |> List.findFirst (fn p -> at grid p == char)
+
+add : Point -> Point -> Point
+add = fn a, b ->
+    { row = a.row + b.row, col = a.col + b.col }
+
+scale : I64 -> Point -> Point
+scale = fn n, p ->
+    { row = n * p.row, col = n * p.col }

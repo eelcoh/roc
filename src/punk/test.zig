@@ -533,48 +533,51 @@ const Files = struct {
 };
 
 const files = Files{ .entries = &.{
-    .{ "app/Math.punk",
-    \\module Math exposing (add, double, Shape(..), Color)
-    \\
-    \\add : I64 -> I64 -> I64
-    \\add = fn a, b -> a + b
-    \\
-    \\double = fn x -> x * 2
-    \\
-    \\secret = fn x -> x
-    \\
-    \\type Shape = Circle F64 | Square F64
-    \\
-    \\type Color = Red | Green
+    .{
+        "app/Math.punk",
+        \\module Math exposing (add, double, Shape(..), Color)
+        \\
+        \\add : I64 -> I64 -> I64
+        \\add = fn a, b -> a + b
+        \\
+        \\double = fn x -> x * 2
+        \\
+        \\secret = fn x -> x
+        \\
+        \\type Shape = Circle F64 | Square F64
+        \\
+        \\type Color = Red | Green
     },
-    .{ "app/Text.roc",
-    \\Text := [].{
-    \\    ## Repeat a string.
-    \\    repeat : Str, U64 -> Str
-    \\    repeat = |s, n| s
-    \\
-    \\    pad_left = |s, n, c| s
-    \\
-    \\    shout : Str -> Str
-    \\    shout = |s|
-    \\        x : Str
-    \\        x = s
-    \\        x
-    \\
-    \\    greeting : Str
-    \\    greeting = "hi"
-    \\}
+    .{
+        "app/Text.roc",
+        \\Text := [].{
+        \\    ## Repeat a string.
+        \\    repeat : Str, U64 -> Str
+        \\    repeat = |s, n| s
+        \\
+        \\    pad_left = |s, n, c| s
+        \\
+        \\    shout : Str -> Str
+        \\    shout = |s|
+        \\        x : Str
+        \\        x = s
+        \\        x
+        \\
+        \\    greeting : Str
+        \\    greeting = "hi"
+        \\}
     },
-    .{ "app/../pf/Stdout.roc",
-    \\Stdout := [].{
-    \\    line! : Str => {}
-    \\    write_both! : Str, Str => {}
-    \\}
+    .{
+        "app/../pf/Stdout.roc",
+        \\Stdout := [].{
+        \\    line! : Str => {}
+        \\    write_both! : Str, Str => {}
+        \\}
     },
 } };
 
 fn checkWith(src: []const u8, expected: []const u8) (punk.Error || error{TestExpectedEqual})!void {
-    const reader = mod.Reader{ .ctx = @constCast(@ptrCast(&files)), .read = Files.read };
+    const reader = mod.Reader{ .ctx = @ptrCast(@constCast(&files)), .read = Files.read };
     const out = try mod.toRocWith(std.testing.allocator, "app/main.punk", src, reader);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings(expected, out);
@@ -584,7 +587,7 @@ fn checkWithError(src: []const u8, line: u32, msg_part: []const u8) error{ TestE
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
-    const resolver = punk.Resolver{ .ctx = @constCast(@ptrCast(&files)), .load = testLoad };
+    const resolver = punk.Resolver{ .ctx = @ptrCast(@constCast(&files)), .load = testLoad };
     if (punk.translateWith(arena.allocator(), src, &diag, resolver)) |out| {
         std.debug.print("expected an error, got:\n{s}\n", .{out});
         return error.TestUnexpectedResult;
@@ -694,4 +697,29 @@ test "modules: scanning a Roc module" {
     try std.testing.expectEqual(@as(?u8, null), interface.typeArity(" { a : I64 -> I64 }"));
     try std.testing.expectEqual(@as(?u8, 0), interface.lambdaArity("|| 1"));
     try std.testing.expectEqual(@as(?u8, 2), interface.lambdaArity("|{ a, b }, c| a"));
+}
+
+test "accessor functions" {
+    try check("xs = List.map .name people\n", "xs = List.map(people, |punk_record| punk_record.name)\n");
+    try check("x = (.0) pair\n", "x = (|punk_record| punk_record.0)(pair)\n");
+    try check("x = person.name\n", "x = person.name\n");
+}
+
+test "import exposing with parentheses" {
+    try check("import Grid exposing (Cells, atPoint, Shape(..))\n\nx = 1\n", "import Grid exposing [Cells, at_point, Shape]\n\nx = 1\n");
+}
+
+test "empty sets and dicts are values" {
+    try check("s = Set.empty |> Set.insert 1\n", "s = Set.insert(Set.empty(), 1)\n");
+    try check("d = Dict.empty\n", "d = Dict.empty()\n");
+}
+
+test "multi-line strings" {
+    // Indented between lines of their own: the indentation and the outer line breaks go.
+    try check("example =\n    \"\"\"\n    3   4\n      \"x\" ${name}\n    \"\"\"\n\ny = 1\n", "example = \"3   4\\n  \\\"x\\\" ${name}\"\n\ny = 1\n");
+    // Otherwise the text is kept as it is.
+    try check("x = \"\"\"a\nb\"\"\"\ny = 2\n", "x = \"a\\nb\"\ny = 2\n");
+    try checkError("x = \"\"\"a\n", 1, "unterminated multi-line string");
+    // Line numbers after the string still count its lines.
+    try checkError("x = \"\"\"a\nb\nc\"\"\"\ny = )\n", 4, "expected an expression");
 }
