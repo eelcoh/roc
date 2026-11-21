@@ -71,18 +71,42 @@ findLink = fn id ->
   then one of `Db.all`, `Db.first`, `Db.update (fn l -> { l | url = new })`
   or `Db.delete`. `Db.insert row links` and `Db.insertIfNew row links` (`ON
   CONFLICT DO NOTHING`) add a row. `Db.run!` runs a `Db.Query a`; the
-  changing ones give the number of rows changed.
+  changing ones give the number of rows changed. `Db.runAs! user query`
+  runs it as the user, for the tables whose policies look at the user.
 - **Checked by the compiler, without a database.** A column the table
   doesn't have, a literal of the wrong type and a comparison of a `Str` with
   an `Int` are errors with a code (P403); a function the database can't run
   (your own function, `String.startsWith`) is P402. A value from outside the
   query becomes a parameter typed by the column it meets (`Db.param_text`),
   so Roc's type checker catches a variable of the wrong type.
-- **A policy per table.** A table says who may read, insert, update and
-  delete; without all four it doesn't compile (P401), and a query that
-  does what the policy forbids is P404. In B1 a policy is `everyone` or
-  `nobody`; B2 adds functions of the user and the row, which become
-  Postgres row-level security.
+- **A policy per table, kept by the database.** A table says who may read,
+  insert, update and delete; without all four it doesn't compile (P401), and
+  a query that does what a `nobody` forbids is P404. A policy is `everyone`,
+  `nobody`, or a function of the user and the row:
+
+  ```
+  table notes : Note
+      key id
+      read fn user, note -> note.public || note.owner == user.id
+      insert fn user, note -> note.owner == user.id
+      update fn user, note -> note.owner == user.id
+      delete nobody
+  ```
+
+  Each becomes a Postgres row-level security policy (`ENABLE` and `FORCE
+  ROW LEVEL SECURITY`, `CREATE POLICY ... USING (owner = <the user>)`), so the
+  database keeps to it for every query, also SQL by hand. `nobody` gets no
+  policy, so no row. The fields of the user go to the database as settings
+  of the query's transaction (`punk.user_id`); `Db.runAs! user query` gives
+  them, `Db.run!` gives none, and then a policy that compares with the user
+  is not true. A row a policy refuses to insert or keep is error `42501`.
+  The fields of the user get their type from the column they meet.
+- **A role that keeps to the policies.** The app connects as a role of its
+  own: `Postgres::new` refuses a superuser or a role with `BYPASSRLS`, which
+  skip row-level security. The wiring makes the tables with `Owner` (a role
+  that owns them) and lets the app's role use them with `Owner::grant`;
+  `examples/punk/notes` shows it, and `punk_server_postgres::testing` sets
+  up both roles for tests.
 - **The schema comes from the program.** `punk check --schema app.punk`
   prints the `CREATE TABLE` statements (`Str` is `text`, `Int` `bigint`,
   `Float` `double precision`, `Bool` `boolean`, `Maybe` nullable, the key

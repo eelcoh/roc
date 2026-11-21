@@ -15,7 +15,7 @@ Postgres := [].{
     ## `Postgres.rows! decoder query`.
     rows! : Sql.Query, Row.Decoder(a) => Try(List(a), [PgErr({ code : Str, message : Str }), RowErr(Str)])
     rows! = |query, decoder| {
-        result = run_host!(Sql.to_params(query), Sql.to_sql(query))
+        result = run_host!([], Sql.to_params(query), Sql.to_sql(query))
         if result.ok {
             match Row.decode_rows(result.rows, decoder, result.columns) {
                 Ok(values) => Ok(values)
@@ -31,7 +31,7 @@ Postgres := [].{
     ## `Postgres.row! decoder query`.
     row! : Sql.Query, Row.Decoder(a) => Try([Just(a), Nothing], [PgErr({ code : Str, message : Str }), RowErr(Str)])
     row! = |query, decoder| {
-        result = run_host!(Sql.to_params(query), Sql.to_sql(query))
+        result = run_host!([], Sql.to_params(query), Sql.to_sql(query))
         if result.ok {
             match result.rows {
                 [] => Ok(Nothing)
@@ -51,7 +51,7 @@ Postgres := [].{
     ## and gives the number of rows it changed. Rows it returns are ignored.
     execute! : Sql.Query => Try(U64, [PgErr({ code : Str, message : Str })])
     execute! = |query| {
-        result = run_host!(Sql.to_params(query), Sql.to_sql(query))
+        result = run_host!([], Sql.to_params(query), Sql.to_sql(query))
         if result.ok {
             Ok(result.affected)
         } else {
@@ -61,8 +61,10 @@ Postgres := [].{
 
     ## What the host gives for a query: the column names and the rows, or the
     ## error. The host prepares the SQL, gives each parameter the type the
-    ## statement wants and reads each column as text, int, float or bool.
-    run_host! : List(Sql.Param), Str => {
+    ## statement wants and reads each column as text, int, float or bool. The
+    ## settings (`("punk.user_id", "u1")`, from `Db.runAs!`) hold for the
+    ## query's transaction only: the policies of the tables read them.
+    run_host! : List((Str, Str)), List(Sql.Param), Str => {
         affected : U64,
         columns : List(Str),
         error_code : Str,

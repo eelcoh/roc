@@ -855,6 +855,23 @@ pub const Parser = struct {
             if (t.tag != .lower) return p.errAt(t, "expected a line of the table, such as 'key id' or 'read everyone', but found '{s}'", .{describe(t)});
             const word = p.advance();
             const arg = p.tok();
+            if (arg.tag == .kw_fn and !arg.first_on_line) {
+                // `read fn user, link -> link.owner == user.id`: the policy is
+                // a function, which ends where the next line of the table starts.
+                const saved_stop = p.stop_col;
+                const saved_start = p.stmt_start;
+                p.stop_col = word.col;
+                p.stmt_start = p.pos;
+                defer {
+                    p.stop_col = saved_stop;
+                    p.stmt_start = saved_start;
+                }
+                const policy = try p.parseExpr();
+                const n = p.tok();
+                if (n.tag != .eof and !n.first_on_line) return p.errAt(n, "expected the next line of the table after the policy of '{s}', but found '{s}'", .{ word.text, describe(n) });
+                try lines.append(p.a, .{ .word = word.text, .arg = arg.text, .policy = policy });
+                continue;
+            }
             if (arg.first_on_line or (arg.tag != .lower and arg.tag != .upper)) return p.errAt(arg, "expected what '{s}' is, as in '{s} everyone', but found '{s}'", .{ word.text, word.text, describe(arg) });
             _ = p.advance();
             const n = p.tok();
@@ -1874,6 +1891,8 @@ pub const Emitter = struct {
     db_alias: ?[]const u8 = null,
     /// The tables the module declares, by name (query.zig).
     tables: std.StringHashMapUnmanaged(*query.Table) = .empty,
+    /// The fields of the user that the tables' policies look at (query.zig).
+    db_user: std.ArrayListUnmanaged(query.UserField) = .empty,
 
     /// `order` is not `.none` for names imported unqualified from a Roc
     /// module (`import Json exposing [decode]`).

@@ -38,8 +38,9 @@ pub const TableDecl = struct {
     row_type: []const u8,
     lines: []const Line,
 
-    /// `key id`, `read everyone`, ...
-    pub const Line = struct { word: []const u8, arg: []const u8 };
+    /// `key id`, `read everyone`, `read fn user, link -> ...` (then
+    /// `policy` is the function and `arg` is "fn").
+    pub const Line = struct { word: []const u8, arg: []const u8, policy: ?*Expr = null };
 };
 
 /// The type of a column: Str, Int, Float or Bool, or `Maybe` of one of
@@ -81,9 +82,25 @@ pub const Column = struct {
     ty: ColType,
 };
 
-/// Who may do an operation on a table. B2 adds a function of the user and
-/// the row, which becomes a row-level security policy.
-pub const Access = enum { everyone, nobody };
+/// Who may do an operation on a table: everyone, nobody, or the users for
+/// whom a function of the user and the row is true. Each becomes a
+/// row-level security policy in Postgres (`schemaSql`), so the database
+/// itself keeps to it, also for SQL that doesn't come from a query.
+pub const Access = union(enum) {
+    everyone,
+    nobody,
+    /// `fn user, link -> link.owner == user.id`, as the SQL of the policy.
+    rule: []const u8,
+};
+
+/// A field of the user that a policy looks at (`user.id`): the app gives it
+/// with `Db.runAs! user query`, and the policy reads it from the setting
+/// `punk.user_<field>` of the transaction.
+pub const UserField = struct {
+    name: []const u8,
+    setting: []const u8,
+    ty: ColType,
+};
 
 pub const Op = enum {
     read,
@@ -108,6 +125,11 @@ pub const Table = struct {
     columns: []const Column,
     key: ?usize,
     access: [4]Access,
+
+    /// The table's name in SQL without quotes (`links`).
+    fn plain(t: *const Table) []const u8 {
+        return if (t.sql[0] == '"') t.sql[1 .. t.sql.len - 1] else t.sql;
+    }
 
     fn column(t: *const Table, name: []const u8) ?*const Column {
         for (t.columns) |*c| if (std.mem.eql(u8, c.name, name)) return c;
@@ -190,8 +212,14 @@ fn resolveTable(e: *Emitter, items: []const tr.Item, decl: TableDecl) Error!*Tab
         if (seen[@intFromEnum(op)]) {
             return e.errAtRule(line.word, .table_decl, try std.fmt.allocPrint(a, "the table '{s}' says twice who may {s}", .{ decl.name, op.verb() }));
         }
-        const access = std.meta.stringToEnum(Access, line.arg) orelse {
-            return e.errAtRule(line.arg, .table_decl, try std.fmt.allocPrint(a, "who may {s}: 'everyone' or 'nobody', not '{s}'", .{ op.verb(), line.arg }));
+        const access: Access = if (line.policy) |policy|
+            .{ .rule = try policySql(e, table, op, line.word, policy) }
+        else if (std.mem.eql(u8, line.arg, "everyone"))
+            .everyone
+        else if (std.mem.eql(u8, line.arg, "nobody"))
+            .nobody
+        else {
+            return e.errAtRule(line.arg, .table_decl, try std.fmt.allocPrint(a, "who may {s}: 'everyone', 'nobody' or a function of the user and the row (fn user, {s} -> ...), not '{s}'", .{ op.verb(), rowName(table), line.arg }));
         };
         seen[@intFromEnum(op)] = true;
         table.access[@intFromEnum(op)] = access;
@@ -201,6 +229,59 @@ fn resolveTable(e: *Emitter, items: []const tr.Item, decl: TableDecl) Error!*Tab
         return e.errAtRule(decl.name, .table_decl, try std.fmt.allocPrint(a, "the table '{s}' doesn't say who may {s} its rows: add the line '{s} everyone' or '{s} nobody'. A table says who may read, insert, update and delete, so that no rows are open by accident.", .{ decl.name, op.verb(), op.verb(), op.verb() }));
     };
     return table;
+}
+
+/// A name for a row of the table in examples: `links` gives `link`.
+fn rowName(t: *const Table) []const u8 {
+    const n = t.decl.name;
+    return if (n.len > 1 and n[n.len - 1] == 's') n[0 .. n.len - 1] else "row";
+}
+
+/// The SQL of a policy `fn user, link -> ...`: an expression over the
+/// columns of the row and the fields of the user, which it reads from the
+/// settings `Db.runAs!` gives the transaction. Without a user (`Db.run!`) a
+/// setting is NULL, and a policy that compares with it is not true.
+fn policySql(e: *Emitter, table: *const Table, op: Op, at: []const u8, policy: *Expr) Error![]const u8 {
+    const a = e.a;
+    var x = policy;
+    while (x.* == .paren) x = x.paren;
+    const example = try std.fmt.allocPrint(a, "{s} fn user, {s} -> {s}.owner == user.id", .{ op.verb(), rowName(table), rowName(table) });
+    if (x.* != .lambda or x.lambda.params.len != 2) {
+        return e.errAtRule(at, .table_decl, try std.fmt.allocPrint(a, "a policy is 'everyone', 'nobody' or a function of the user and the row: {s}", .{example}));
+    }
+    const lam = x.lambda;
+    var names: [2]?[]const u8 = .{ null, null };
+    for (lam.params, 0..) |param, i| names[i] = switch (param.*) {
+        .ident => |n| n,
+        .underscore => null,
+        else => return e.errAtRule(at, .table_decl, try std.fmt.allocPrint(a, "the function of a policy takes the user and the row as names: {s}", .{example})),
+    };
+    if (lam.body.stmts.len > 0 or lam.body.result == null) {
+        return e.errAtRule(at, .table_decl, "the function of a policy is one expression, so that it can run in the database");
+    }
+    var sql: std.ArrayList(u8) = .empty;
+    var params: std.ArrayList(Param) = .empty;
+    var q: Sql = .{ .e = e, .table = table, .row = names[1], .out = &sql, .params = &params, .user = names[0], .policy = true };
+    const body = lam.body.result.?;
+    const ty = try q.expr(body, .{ .base = .bool }, 0);
+    if (ty.base != .bool or ty.nullable) {
+        return e.errAtRule(exprText(body) orelse at, .query_type, try std.fmt.allocPrint(a, "the function of a policy gives a Bool, true for the rows the user may {s}, but this one gives {s}", .{ op.verb(), try ty.an(a) }));
+    }
+    return sql.items;
+}
+
+/// The field `name` of the user, typed `ty` by the column it meets; the
+/// same field has one type in all policies of the module.
+fn userField(e: *Emitter, name: []const u8, ty: ColType) Error!*const UserField {
+    const a = e.a;
+    for (e.db_user.items) |*f| if (std.mem.eql(u8, f.name, name)) {
+        if (!f.ty.eql(ty)) {
+            return e.errAtRule(name, .query_type, try std.fmt.allocPrint(a, "'user.{s}' is {s} in another policy, and {s} here", .{ name, try f.ty.an(a), try ty.an(a) }));
+        }
+        return f;
+    };
+    try e.db_user.append(a, .{ .name = name, .setting = try std.fmt.allocPrint(a, "punk.user_{s}", .{try tr.snake(a, name)}), .ty = ty });
+    return &e.db_user.items[e.db_user.items.len - 1];
 }
 
 fn findAlias(items: []const tr.Item, name: []const u8) ?*tr.Type {
@@ -281,19 +362,55 @@ pub fn schemaSql(a: Allocator, tables: []const *const Table) Allocator.Error![]c
             try out.print(a, "    {s} {s}{s}{s}\n", .{ c.sql, sql_ty, constraint, if (i + 1 < t.columns.len) "," else "" });
         }
         try out.appendSlice(a, ");\n");
+        try policiesSql(a, &out, t);
     }
     return out.items;
 }
 
+/// Row-level security for a table: Postgres only gives the rows a policy
+/// allows, also to SQL that doesn't come from a query, and also to the
+/// owner of the table (FORCE). An operation that is 'nobody' gets no policy,
+/// so no row is allowed. The policies are dropped and made again, so the
+/// schema can be applied more than once.
+fn policiesSql(a: Allocator, out: *std.ArrayList(u8), t: *const Table) Allocator.Error!void {
+    try out.print(a, "ALTER TABLE {s} ENABLE ROW LEVEL SECURITY;\n", .{t.sql});
+    try out.print(a, "ALTER TABLE {s} FORCE ROW LEVEL SECURITY;\n", .{t.sql});
+    for (t.access, 0..) |access, i| {
+        const op: Op = @enumFromInt(i);
+        const name = try sqlIdent(a, try std.fmt.allocPrint(a, "{s}_{s}", .{ t.plain(), op.verb() }));
+        try out.print(a, "DROP POLICY IF EXISTS {s} ON {s};\n", .{ name, t.sql });
+        const cond = switch (access) {
+            .nobody => continue,
+            .everyone => "true",
+            .rule => |sql| sql,
+        };
+        const command = switch (op) {
+            .read => "SELECT",
+            .insert => "INSERT",
+            .update => "UPDATE",
+            .delete => "DELETE",
+        };
+        try out.print(a, "CREATE POLICY {s} ON {s} FOR {s}", .{ name, t.sql, command });
+        switch (op) {
+            .insert => try out.print(a, " WITH CHECK ({s});\n", .{cond}),
+            .update => try out.print(a, " USING ({s}) WITH CHECK ({s});\n", .{ cond, cond }),
+            .read, .delete => try out.print(a, " USING ({s});\n", .{cond}),
+        }
+    }
+}
+
 // Queries
 
-const Member = enum { filter, map, all, first, insert, insertIfNew, update, delete };
+const Member = enum { filter, map, all, first, insert, insertIfNew, update, delete, runAs };
 
 /// The query-language function `name` names (`Db.filter`), if it is one.
 pub fn member(e: *const Emitter, name: []const u8) ?Member {
     const alias = e.db_alias orelse return null;
     if (name.len <= alias.len + 1 or !std.mem.startsWith(u8, name, alias) or name[alias.len] != '.') return null;
-    return std.meta.stringToEnum(Member, name[alias.len + 1 ..]);
+    const rest = name[alias.len + 1 ..];
+    if (std.mem.eql(u8, rest, "runAs!")) return .runAs;
+    if (std.mem.eql(u8, rest, "runAs")) return null;
+    return std.meta.stringToEnum(Member, rest);
 }
 
 /// The error for a query-language function used other than at the end of
@@ -328,10 +445,12 @@ const Shape = union(enum) {
 pub fn emit(e: *Emitter, name: []const u8, m: Member, args: []*Expr) Error!void {
     const a = e.a;
     const alias = e.db_alias.?;
+    if (m == .runAs) return emitRunAs(e, name, args);
     const want: usize = switch (m) {
         .filter, .map => return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(a, "a query ends in {s}.all, {s}.first, {s}.update or {s}.delete, which say what it gives: links |> {s}.filter (fn link -> ...) |> {s}.all", .{ alias, alias, alias, alias, alias, alias })),
         .all, .first, .delete => 1,
         .update, .insert, .insertIfNew => 2,
+        .runAs => unreachable,
     };
     if (args.len != want) {
         return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(a, "'{s}' needs {d} argument{s} here, the last one the query before it: punk turns the whole query into SQL, so it can't be applied partly", .{ name, want, if (want == 1) "" else "s" }));
@@ -449,6 +568,55 @@ pub fn emit(e: *Emitter, name: []const u8, m: Member, args: []*Expr) Error!void 
     try e.w(")");
 }
 
+/// `Db.runAs! user query`: runs the query as this user, so that the
+/// policies of the tables see the fields of the user they look at. They go
+/// to the database as settings of the query's transaction:
+/// `Db.run_as!([Db.setting_text("punk.user_id", u.id)], query)`.
+fn emitRunAs(e: *Emitter, name: []const u8, args: []*Expr) Error!void {
+    const a = e.a;
+    const alias = e.db_alias.?;
+    if (args.len != 2) {
+        return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(a, "'{s}' takes the user and the query: {s} user (findLinks user)", .{ name, name }));
+    }
+    if (e.db_user.items.len == 0) {
+        return e.errAtRule(name, .not_allowed, try std.fmt.allocPrint(a, "no policy of a table in this module looks at the user, so '{s}' has nothing to give it: use {s}.run!, or a policy such as 'read fn user, link -> link.owner == user.id'", .{ name, alias }));
+    }
+    e.fresh += 1;
+    const tmp = try std.fmt.allocPrint(a, "punk_user{d}", .{e.fresh});
+    try e.markAt(name, 0);
+    try e.w("{");
+    e.indent += 1;
+    try e.nl();
+    try e.w(tmp);
+    try e.w(" = ");
+    try e.emitExpr(args[0]);
+    try e.nl();
+    try e.w(alias);
+    try e.w(".run_as!([");
+    for (e.db_user.items, 0..) |f, i| {
+        if (i > 0) try e.w(", ");
+        try e.w(alias);
+        try e.w(switch (f.ty.base) {
+            .str => ".setting_text(\"",
+            .int => ".setting_int(\"",
+            .float => ".setting_float(\"",
+            .bool => ".setting_bool(\"",
+        });
+        try e.w(f.setting);
+        try e.w("\", ");
+        try e.w(tmp);
+        try e.w(".");
+        try e.w(try tr.snake(a, f.name));
+        try e.w(")");
+    }
+    try e.w("], ");
+    try e.emitExpr(args[1]);
+    try e.w(")");
+    e.indent -= 1;
+    try e.nl();
+    try e.w("}");
+}
+
 fn notATable(e: *Emitter, n: []const u8) Error {
     const alias = e.db_alias orelse "Db";
     return e.errAtRule(n, .not_in_database, try std.fmt.allocPrint(e.a, "a query starts at a table that this module declares ('table links : Link'), but '{s}' is not one: links |> {s}.filter (fn link -> ...) |> {s}.all", .{ n, alias, alias }));
@@ -460,7 +628,7 @@ fn notATableExpr(e: *Emitter, at: []const u8) Error {
 }
 
 fn checkAccess(e: *Emitter, table: *const Table, op: Op, at: []const u8) Error!void {
-    if (table.access[@intFromEnum(op)] == .everyone) return;
+    if (table.access[@intFromEnum(op)] != .nobody) return;
     return e.errAtRule(at, .not_allowed, try std.fmt.allocPrint(e.a, "the table '{s}' doesn't allow anyone to {s} its rows ('{s} nobody' in its declaration)", .{ table.decl.name, op.verb(), op.verb() }));
 }
 
@@ -753,6 +921,10 @@ const Sql = struct {
     row: ?[]const u8,
     out: *std.ArrayList(u8),
     params: *std.ArrayList(Param),
+    /// In a policy: the name of the user (`fn user, link -> ...`). A policy
+    /// has no parameters: its values are the row, the user and constants.
+    user: ?[]const u8 = null,
+    policy: bool = false,
 
     fn w(q: *Sql, s: []const u8) Allocator.Error!void {
         try q.out.appendSlice(q.e.a, s);
@@ -797,7 +969,8 @@ const Sql = struct {
     /// of the operator around it.
     fn expr(q: *Sql, x: *Expr, want: ?ColType, prec: u8) Error!ColType {
         const a = q.e.a;
-        if (!q.mentionsRow(x)) {
+        if (q.policy) if (try q.policyLeaf(x, want)) |ty| return ty;
+        if (!q.policy and !q.mentionsRow(x)) {
             var v = x;
             while (v.* == .paren) v = v.paren;
             if (v.* == .upper and (std.mem.eql(u8, v.upper, "True") or std.mem.eql(u8, v.upper, "False"))) {
@@ -835,6 +1008,75 @@ const Sql = struct {
         return q.notInDatabase(x);
     }
 
+    /// A value in a policy that is not a column: a field of the user, a
+    /// constant, True or False. Null for an operation, which `expr` writes.
+    fn policyLeaf(q: *Sql, x: *Expr, want: ?ColType) Error!?ColType {
+        const a = q.e.a;
+        switch (x.*) {
+            .paren => |inner| {
+                switch (inner.*) {
+                    .field, .string, .literal, .upper, .ident => return q.policyLeaf(inner, want),
+                    else => return null,
+                }
+            },
+            .field => |f| {
+                if (q.isRow(f.target)) return null;
+                var target = f.target;
+                while (target.* == .paren) target = target.paren;
+                const user = q.user orelse return q.notInPolicy(x);
+                if (target.* != .ident or !std.mem.eql(u8, target.ident, user)) return q.notInPolicy(x);
+                const ty = want orelse {
+                    return q.e.errAtRule(f.name, .query_type, try std.fmt.allocPrint(a, "punk can't tell the type of '{s}.{s}' here: compare it with a column of the row, as in {s}.owner == {s}.{s}", .{ user, f.name, q.row orelse "row", user, f.name }));
+                };
+                if (ty.nullable) {
+                    return q.e.errAtRule(f.name, .query_type, try std.fmt.allocPrint(a, "'{s}.{s}' meets a Maybe column here: a policy compares the user with a column that always has a value, so that a user without '{s}' gets no rows", .{ user, f.name, f.name }));
+                }
+                const field = try userField(q.e, f.name, ty);
+                const cast = switch (ty.base) {
+                    .str => "",
+                    .int => "::bigint",
+                    .float => "::double precision",
+                    .bool => "::boolean",
+                };
+                try q.out.print(a, "NULLIF(current_setting('{s}', true), ''){s}", .{ field.setting, cast });
+                return ty;
+            },
+            .upper => |u| {
+                if (std.mem.eql(u8, u, "True") or std.mem.eql(u8, u, "False")) {
+                    try q.w(if (std.mem.eql(u8, u, "True")) "TRUE" else "FALSE");
+                    return .{ .base = .bool };
+                }
+                return q.notInPolicy(x);
+            },
+            .string => |s| {
+                if (s.len < 2 or s[0] != '"' or std.mem.findAny(u8, s[1 .. s.len - 1], "\\$\"\n") != null) {
+                    return q.e.errAtRule(s, .not_in_database, "a text in a policy is plain text, without \\, ${...} or quotes");
+                }
+                try q.w("'");
+                for (s[1 .. s.len - 1]) |c| {
+                    if (c == '\'') try q.w("'");
+                    try q.out.append(a, c);
+                }
+                try q.w("'");
+                const ty: ColType = .{ .base = .str };
+                if (want) |w_ty| try q.expectType(x, ty, w_ty, "the column it meets");
+                return ty;
+            },
+            .literal => |l| {
+                const ty = literalType(x) orelse return q.notInPolicy(x);
+                if (want) |w_ty| try checkLiteral(q.e, x, w_ty, "the column it meets");
+                for (l) |c| if (c != '_') try q.out.append(a, c);
+                return ty;
+            },
+            .ident => return q.notInPolicy(x),
+            else => return null,
+        }
+    }
+
+    fn notInPolicy(q: *Sql, x: *Expr) Error {
+        return q.e.errAtRule(exprText(x) orelse "", .not_in_database, try std.fmt.allocPrint(q.e.a, "a policy can use the columns of the row, the fields of the user ({s}.id), constants, ==, /=, <, <=, >, >=, &&, ||, not, +, -, * and ++", .{q.user orelse "user"}));
+    }
+
     fn binop(q: *Sql, x: *Expr, op: []const u8, lhs: *Expr, rhs: *Expr, outer: u8) Error!ColType {
         const a = q.e.a;
         const info = tr.Parser.opInfo(op) orelse return q.notInDatabase(x);
@@ -864,8 +1106,8 @@ const Sql = struct {
                 try q.w(if (negate) " IS NOT NULL" else " IS NULL");
                 return .{ .base = .bool };
             }
-            const lt0 = try q.typeOf(lhs);
-            const rt0 = try q.typeOf(rhs);
+            const lt0 = (try q.typeOf(lhs)) orelse if (q.policy) literalType(unparen(lhs)) else null;
+            const rt0 = (try q.typeOf(rhs)) orelse if (q.policy) literalType(unparen(rhs)) else null;
             const nullable = (lt0 != null and lt0.?.nullable) or (rt0 != null and rt0.?.nullable);
             if (nullable and !(std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "!="))) {
                 return q.e.errAtRule(op, .query_type, "a Maybe column is compared with == or /=: there is no order between Nothing and a value");
@@ -923,6 +1165,12 @@ fn isArith(op: []const u8) bool {
 
 fn isNumber(t: ColType) bool {
     return t.base == .int or t.base == .float;
+}
+
+fn unparen(x_in: *Expr) *Expr {
+    var x = x_in;
+    while (x.* == .paren) x = x.paren;
+    return x;
 }
 
 fn isNothing(x_in: *Expr) bool {

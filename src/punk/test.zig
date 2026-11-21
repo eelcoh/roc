@@ -1423,8 +1423,108 @@ test "queries: keywords as names, and the schema" {
         \\    paid boolean NOT NULL,
         \\    memo text
         \\);
+        \\ALTER TABLE "order" ENABLE ROW LEVEL SECURITY;
+        \\ALTER TABLE "order" FORCE ROW LEVEL SECURITY;
+        \\DROP POLICY IF EXISTS order_read ON "order";
+        \\CREATE POLICY order_read ON "order" FOR SELECT USING (true);
+        \\DROP POLICY IF EXISTS order_insert ON "order";
+        \\DROP POLICY IF EXISTS order_update ON "order";
+        \\DROP POLICY IF EXISTS order_delete ON "order";
+        \\CREATE POLICY order_delete ON "order" FOR DELETE USING (true);
         \\
     , try punk.schema(arena.allocator(), src, &diag));
+}
+
+const policy_head =
+    \\app [main!] { pf: platform "p.roc" }
+    \\
+    \\import pf.Db
+    \\
+    \\type alias Note =
+    \\    { id : Str
+    \\    , owner : Str
+    \\    , level : Int
+    \\    , public : Bool
+    \\    , memo : Maybe Str
+    \\    }
+    \\
+    \\table notes : Note
+    \\    key id
+    \\    read fn user, note -> note.public || note.owner == user.id || user.isAdmin
+    \\    insert fn user, note ->
+    \\        note.owner == user.id && note.level <= user.level
+    \\    update fn user, _ -> user.isAdmin
+    \\    delete fn _, note -> note.owner == "it's me" && note.level > 2
+    \\
+    \\
+;
+
+test "policies: functions of the user and the row are row-level security" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    const schema = punk.schema(arena.allocator(), policy_head, &diag) catch |err| {
+        std.debug.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.col, diag.message });
+        return err;
+    };
+    const policies = schema[std.mem.find(u8, schema, "ALTER TABLE").?..];
+    try std.testing.expectEqualStrings(
+        \\ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+        \\ALTER TABLE notes FORCE ROW LEVEL SECURITY;
+        \\DROP POLICY IF EXISTS notes_read ON notes;
+        \\CREATE POLICY notes_read ON notes FOR SELECT USING (public OR owner = NULLIF(current_setting('punk.user_id', true), '') OR NULLIF(current_setting('punk.user_is_admin', true), '')::boolean);
+        \\DROP POLICY IF EXISTS notes_insert ON notes;
+        \\CREATE POLICY notes_insert ON notes FOR INSERT WITH CHECK (owner = NULLIF(current_setting('punk.user_id', true), '') AND level <= NULLIF(current_setting('punk.user_level', true), '')::bigint);
+        \\DROP POLICY IF EXISTS notes_update ON notes;
+        \\CREATE POLICY notes_update ON notes FOR UPDATE USING (NULLIF(current_setting('punk.user_is_admin', true), '')::boolean) WITH CHECK (NULLIF(current_setting('punk.user_is_admin', true), '')::boolean);
+        \\DROP POLICY IF EXISTS notes_delete ON notes;
+        \\CREATE POLICY notes_delete ON notes FOR DELETE USING (owner = 'it''s me' AND level > 2);
+        \\
+    , policies);
+
+    // `Db.runAs!` gives the fields of the user that the policies look at.
+    const out = try punk.translate(arena.allocator(), policy_head ++ "main! = fn u -> Db.runAs! u (notes |> Db.all)\n", &diag);
+    const start = std.mem.find(u8, out, "main! = ").?;
+    try std.testing.expectEqualStrings(
+        \\main! = |u| {
+        \\    punk_user1 = u
+        \\    Db.run_as!([Db.setting_text("punk.user_id", punk_user1.id), Db.setting_bool("punk.user_is_admin", punk_user1.is_admin), Db.setting_int("punk.user_level", punk_user1.level)], Db.all_rows([], "SELECT id, owner, level, public, memo FROM notes", Db.field(Db.read_text, "id", |punk_c2| Db.field(Db.read_text, "owner", |punk_c3| Db.field(Db.read_int, "level", |punk_c4| Db.field(Db.read_bool, "public", |punk_c5| Db.field(Db.read_nullable(Db.read_text), "memo", |punk_c6| Db.done({ id: punk_c2, owner: punk_c3, level: punk_c4, public: punk_c5, memo: punk_c6 }))))))))
+        \\}
+        \\
+    , out[start..]);
+}
+
+test "rules: policies (P401..P404)" {
+    const head =
+        \\app [main!] { pf: platform "p.roc" }
+        \\
+        \\import pf.Db
+        \\
+        \\type alias L =
+        \\    { id : Str
+        \\    , owner : Str
+        \\    , note : Maybe Str
+        \\    }
+        \\
+        \\table ls : L
+        \\    key id
+        \\    insert nobody
+        \\    update nobody
+        \\    delete nobody
+        \\
+    ;
+    // A policy is a function of the user and the row.
+    try checkRule(head ++ "    read fn l -> l.owner == \"x\"\n", 16, 5, .table_decl);
+    // ... of the row, the user and constants only.
+    try checkRule(head ++ "    read fn u, l -> l.owner == someone\n", 16, 32, .not_in_database);
+    try checkRule(head ++ "    read fn u, l -> l.owner == String.toLower u.id\n", 16, 32, .not_in_database);
+    // A field of the user gets its type from the column it meets.
+    try checkRule(head ++ "    read fn u, l -> u.id == u.other\n", 16, 23, .query_type);
+    try checkRule(head ++ "    read fn u, l -> l.note == u.note\n", 16, 33, .query_type);
+    try checkRule(head ++ "    read fn u, l -> l.owner == u.id && u.id\n", 16, 42, .query_type);
+    try checkRule(head ++ "    read fn u, l -> l.owner\n", 16, 23, .query_type);
+    // Db.runAs! needs a policy that looks at the user.
+    try checkRule(head ++ "    read everyone\n\nmain! = fn u -> Db.runAs! u (ls |> Db.all)\n", 18, 17, .not_allowed);
 }
 
 test "rules: tables and queries (P401..P404)" {

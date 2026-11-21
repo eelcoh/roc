@@ -12,48 +12,30 @@ use ambit_server::Handler;
 use ambit_server::http::{StatusCode, header};
 use ambit_server_sim::{SeededRandom, SimClock, get, post};
 use punk_server::{Database, Value};
-use punk_server_postgres::Postgres;
+use punk_server_postgres::{Owner, Postgres, testing};
 
 const TTL: Duration = Duration::from_secs(3600);
 
-/// The test database with a fresh, empty schema `name` holding the shortener's table, or `None`
-/// when there is no test database.
-fn database(name: &str) -> Option<std::sync::Arc<Postgres>> {
-    let Ok(url) = std::env::var("PUNK_TEST_POSTGRES") else {
-        assert!(
-            std::env::var_os("PUNK_REQUIRE_POSTGRES").is_none(),
-            "PUNK_REQUIRE_POSTGRES is set, but PUNK_TEST_POSTGRES isn't"
-        );
-        eprintln!("no PUNK_TEST_POSTGRES: skipping {name}");
-        return None;
-    };
-    let schema = format!("punk_shortener_{name}");
-    Postgres::new(&url, 1)
-        .unwrap()
-        .batch(&format!(
-            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};"
-        ))
-        .unwrap();
-    let url = if url.contains("://") {
-        let separator = if url.contains('?') { "&" } else { "?" };
-        format!("{url}{separator}options=-c%20search_path%3D{schema}")
-    } else {
-        format!("{url} options='-c search_path={schema}'")
-    };
-    let db = Postgres::new(&url, 2).unwrap();
-    db.batch(shortener::SCHEMA).unwrap();
-    Some(std::sync::Arc::new(db))
+/// The test database with a fresh, empty schema `name` holding the shortener's table, and its
+/// owner, or `None` when there is no test database. The app connects as a role of its own, which
+/// keeps to the table's row-level security.
+fn database(name: &str) -> Option<(std::sync::Arc<Postgres>, Owner)> {
+    let (owner, db) = testing::database(&format!("punk_shortener_{name}"), shortener::SCHEMA)?;
+    Some((std::sync::Arc::new(db), owner))
 }
 
-fn setup(name: &str, seed: u64) -> Option<(impl Handler, SimClock, std::sync::Arc<Postgres>)> {
-    let db = database(name)?;
+fn setup(
+    name: &str,
+    seed: u64,
+) -> Option<(impl Handler, SimClock, std::sync::Arc<Postgres>, Owner)> {
+    let (db, owner) = database(name)?;
     let clock = SimClock::at(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
     let config = shortener::Config {
         base_url: "https://s.test".into(),
         ttl: TTL,
     };
     let app = shortener::init(clock.clone(), SeededRandom::new(seed), db.clone(), config);
-    Some((app, clock, db))
+    Some((app, clock, db, owner))
 }
 
 /// How many links are stored.
@@ -78,7 +60,7 @@ fn create(app: &impl Handler, url: &str) -> String {
 
 #[test]
 fn created_link_redirects() {
-    let Some((app, _, _)) = setup("redirects", 1) else {
+    let Some((app, _, _, _)) = setup("redirects", 1) else {
         return;
     };
     let id = create(&app, "https://example.com/some/page?q=1");
@@ -92,7 +74,7 @@ fn created_link_redirects() {
 
 #[test]
 fn unknown_link_is_404() {
-    let Some((app, _, _)) = setup("unknown", 1) else {
+    let Some((app, _, _, _)) = setup("unknown", 1) else {
         return;
     };
     assert_eq!(app.handle(get("/zzzzzzz")).status(), StatusCode::NOT_FOUND);
@@ -101,7 +83,7 @@ fn unknown_link_is_404() {
 
 #[test]
 fn link_expires_after_ttl() {
-    let Some((app, clock, _)) = setup("expires", 1) else {
+    let Some((app, clock, _, _)) = setup("expires", 1) else {
         return;
     };
     let id = create(&app, "https://example.com");
@@ -119,7 +101,7 @@ fn link_expires_after_ttl() {
 
 #[test]
 fn invalid_url_is_rejected_and_not_stored() {
-    let Some((app, _, db)) = setup("invalid", 1) else {
+    let Some((app, _, db, _)) = setup("invalid", 1) else {
         return;
     };
     for body in [
@@ -139,7 +121,7 @@ fn invalid_url_is_rejected_and_not_stored() {
 
 #[test]
 fn a_url_with_sql_in_it_is_just_a_url() {
-    let Some((app, _, db)) = setup("injection", 1) else {
+    let Some((app, _, db, _)) = setup("injection", 1) else {
         return;
     };
     let url = "https://example.com/?q=';DROP TABLE links;--";
@@ -152,7 +134,7 @@ fn a_url_with_sql_in_it_is_just_a_url() {
 
 #[test]
 fn ids_are_unique() {
-    let Some((app, _, db)) = setup("unique", 7) else {
+    let Some((app, _, db, _)) = setup("unique", 7) else {
         return;
     };
     let ids: std::collections::HashSet<_> = (0..200)
@@ -165,7 +147,7 @@ fn ids_are_unique() {
 #[test]
 fn a_taken_id_is_skipped() {
     // Two apps with the same seed pick the same ids; the second finds them taken.
-    let Some((a, _, db)) = setup("taken", 3) else {
+    let Some((a, _, db, _)) = setup("taken", 3) else {
         return;
     };
     let clock = SimClock::at(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
@@ -182,10 +164,10 @@ fn a_taken_id_is_skipped() {
 
 #[test]
 fn same_seed_same_ids() {
-    let Some((a, _, _)) = setup("seed_a", 3) else {
+    let Some((a, _, _, _)) = setup("seed_a", 3) else {
         return;
     };
-    let Some((b, _, _)) = setup("seed_b", 3) else {
+    let Some((b, _, _, _)) = setup("seed_b", 3) else {
         return;
     };
     assert_eq!(
@@ -196,11 +178,13 @@ fn same_seed_same_ids() {
 
 #[test]
 fn storage_down_is_503_and_recovers() {
-    let Some((app, _, db)) = setup("down", 1) else {
+    let Some((app, _, _, owner)) = setup("down", 1) else {
         return;
     };
     let id = create(&app, "https://example.com");
-    db.batch("ALTER TABLE links RENAME TO links_away").unwrap();
+    owner
+        .batch("ALTER TABLE links RENAME TO links_away")
+        .unwrap();
     assert_eq!(
         app.handle(post("/links", "https://example.org")).status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -209,7 +193,9 @@ fn storage_down_is_503_and_recovers() {
         app.handle(get(&format!("/{id}"))).status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    db.batch("ALTER TABLE links_away RENAME TO links").unwrap();
+    owner
+        .batch("ALTER TABLE links_away RENAME TO links")
+        .unwrap();
     assert_eq!(
         app.handle(get(&format!("/{id}"))).status(),
         StatusCode::FOUND
@@ -237,11 +223,11 @@ fn no_database_is_503() {
 
 #[test]
 fn failed_write_creates_nothing_but_reads_still_work() {
-    let Some((app, _, db)) = setup("writes", 1) else {
+    let Some((app, _, db, owner)) = setup("writes", 1) else {
         return;
     };
     let id = create(&app, "https://example.com");
-    db.batch(
+    owner.batch(
         "CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'writes fail'; END $$;
          CREATE TRIGGER refuse BEFORE INSERT ON links FOR EACH ROW EXECUTE FUNCTION refuse();",
     )
@@ -259,10 +245,10 @@ fn failed_write_creates_nothing_but_reads_still_work() {
 
 #[test]
 fn a_row_that_does_not_fit_is_500() {
-    let Some((app, _, db)) = setup("misfit", 1) else {
+    let Some((app, _, _, owner)) = setup("misfit", 1) else {
         return;
     };
-    db.batch("ALTER TABLE links ALTER COLUMN created TYPE text; INSERT INTO links VALUES ('abcdefg', 'https://x.org', '7');")
+    owner.batch("ALTER TABLE links ALTER COLUMN created TYPE text; INSERT INTO links VALUES ('abcdefg', 'https://x.org', '7');")
         .unwrap();
     assert_eq!(
         app.handle(get("/abcdefg")).status(),
@@ -272,7 +258,7 @@ fn a_row_that_does_not_fit_is_500() {
 
 #[test]
 fn every_request_frees_what_it_allocates() {
-    let Some((app, _, _)) = setup("leaks", 5) else {
+    let Some((app, _, _, _)) = setup("leaks", 5) else {
         return;
     };
     let before = punk_server::thread_live_bytes();

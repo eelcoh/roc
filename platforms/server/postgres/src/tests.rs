@@ -3,41 +3,20 @@
 
 use super::*;
 
-/// A pool on a fresh schema of the test database, or `None` when there is no database.
-fn pool(name: &str) -> Option<Postgres> {
-    let Ok(url) = std::env::var("PUNK_TEST_POSTGRES") else {
-        assert!(
-            std::env::var_os("PUNK_REQUIRE_POSTGRES").is_none(),
-            "PUNK_REQUIRE_POSTGRES is set, but PUNK_TEST_POSTGRES isn't"
-        );
-        eprintln!("no PUNK_TEST_POSTGRES: skipping {name}");
-        return None;
-    };
-    let schema = format!("punk_pool_{name}");
-    let setup = Postgres::new(&url, 1).unwrap();
-    setup
-        .batch(&format!(
-            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};"
-        ))
-        .unwrap();
-    let separator = if url.contains("://") {
-        if url.contains('?') { "&" } else { "?" }
-    } else {
-        " "
-    };
-    let url = if url.contains("://") {
-        format!("{url}{separator}options=-c%20search_path%3D{schema}")
-    } else {
-        format!("{url}{separator}options='-c search_path={schema}'")
-    };
-    Some(Postgres::new(&url, 2).unwrap())
+/// A pool on a fresh schema of the test database with these tables, or `None` when there is no
+/// database.
+fn pool(name: &str, tables: &str) -> Option<Postgres> {
+    testing::database(&format!("punk_pool_{name}"), tables).map(|(_, db)| db)
 }
 
 #[test]
 fn parameters_and_columns_have_their_types() {
-    let Some(db) = pool("types") else { return };
-    db.batch("CREATE TABLE t (s smallint, i integer, b bigint, r real, d double precision, t text, v varchar(10), f bool, n text)")
-        .unwrap();
+    let Some(db) = pool(
+        "types",
+        "CREATE TABLE t (s smallint, i integer, b bigint, r real, d double precision, t text, v varchar(10), f bool, n text)",
+    ) else {
+        return;
+    };
     let insert = "INSERT INTO t VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
     let params = [
         Value::Int(-3),
@@ -59,10 +38,9 @@ fn parameters_and_columns_have_their_types() {
 
 #[test]
 fn a_wrong_parameter_type_says_what_to_do() {
-    let Some(db) = pool("wrong_param") else {
+    let Some(db) = pool("wrong_param", "CREATE TABLE t (n integer)") else {
         return;
     };
-    db.batch("CREATE TABLE t (n integer)").unwrap();
     let e = db
         .run("INSERT INTO t VALUES ($1)", &[Value::Text("7".into())])
         .unwrap_err();
@@ -78,7 +56,7 @@ fn a_wrong_parameter_type_says_what_to_do() {
 
 #[test]
 fn an_unknown_column_type_says_how_to_convert_it() {
-    let Some(db) = pool("column_type") else {
+    let Some(db) = pool("column_type", "") else {
         return;
     };
     let e = db.run("SELECT now() AS created", &[]).unwrap_err();
@@ -92,8 +70,9 @@ fn an_unknown_column_type_says_how_to_convert_it() {
 
 #[test]
 fn errors_carry_the_sqlstate() {
-    let Some(db) = pool("errors") else { return };
-    db.batch("CREATE TABLE t (id text PRIMARY KEY)").unwrap();
+    let Some(db) = pool("errors", "CREATE TABLE t (id text PRIMARY KEY)") else {
+        return;
+    };
     db.run("INSERT INTO t VALUES ($1)", &[Value::Text("a".into())])
         .unwrap();
     let e = db
@@ -110,8 +89,9 @@ fn errors_carry_the_sqlstate() {
 
 #[test]
 fn the_pool_shares_its_connections() {
-    let Some(db) = pool("threads") else { return };
-    db.batch("CREATE TABLE t (n bigint)").unwrap();
+    let Some(db) = pool("threads", "CREATE TABLE t (n bigint)") else {
+        return;
+    };
     let db = std::sync::Arc::new(db);
     let threads: Vec<_> = (0..8)
         .map(|i| {
@@ -147,4 +127,103 @@ fn grants_name_the_port_and_the_resolver() {
     assert_eq!(db.grants(), vec![Grant::Connect(6543), Grant::Resolve]);
     let db = Postgres::new("host=127.0.0.1 user=app", 1).unwrap();
     assert_eq!(db.grants(), vec![Grant::Connect(5432)]);
+}
+
+/// A table with policies as punk makes them: everyone reads the public notes and their own,
+/// and writes only their own.
+const NOTES: &str = "
+    CREATE TABLE notes (id text PRIMARY KEY, owner text NOT NULL, public boolean NOT NULL);
+    ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE notes FORCE ROW LEVEL SECURITY;
+    CREATE POLICY notes_read ON notes FOR SELECT USING (public OR owner = NULLIF(current_setting('punk.user_id', true), ''));
+    CREATE POLICY notes_insert ON notes FOR INSERT WITH CHECK (owner = NULLIF(current_setting('punk.user_id', true), ''));
+    INSERT INTO notes VALUES ('a1', 'ann', false), ('a2', 'ann', true), ('b1', 'bob', false);
+";
+
+fn as_user(id: &str) -> Vec<(String, String)> {
+    vec![("punk.user_id".to_owned(), id.to_owned())]
+}
+
+fn ids(db: &Postgres, settings: &[(String, String)]) -> Vec<Value> {
+    let rows = db
+        .run_as(settings, "SELECT id FROM notes ORDER BY id", &[])
+        .unwrap();
+    rows.rows.into_iter().map(|mut r| r.remove(0)).collect()
+}
+
+fn text(s: &str) -> Value {
+    Value::Text(s.to_owned())
+}
+
+#[test]
+fn policies_see_the_user_of_the_query() {
+    let Some(db) = pool("policies", NOTES) else {
+        return;
+    };
+    assert_eq!(ids(&db, &as_user("ann")), [text("a1"), text("a2")]);
+    assert_eq!(ids(&db, &as_user("bob")), [text("a2"), text("b1")]);
+    // Without a user, only what is public; the setting of the last query is gone.
+    assert_eq!(ids(&db, &[]), [text("a2")]);
+    // Bob can't write a note of Ann's: the insert policy refuses it, and nothing is written.
+    let e = db
+        .run_as(
+            &as_user("bob"),
+            "INSERT INTO notes VALUES ('x', 'ann', false)",
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(e.code, "42501");
+    assert_eq!(
+        db.run_as(
+            &as_user("bob"),
+            "INSERT INTO notes VALUES ('b2', 'bob', false)",
+            &[]
+        )
+        .unwrap()
+        .affected,
+        1
+    );
+    // There is no update policy: no row can be changed.
+    let rows = db
+        .run_as(&as_user("ann"), "UPDATE notes SET public = true", &[])
+        .unwrap();
+    assert_eq!(rows.affected, 0);
+}
+
+#[test]
+fn a_failed_query_as_a_user_leaves_the_connection_good() {
+    let Some(db) = pool("rollback", NOTES) else {
+        return;
+    };
+    assert!(db.run_as(&as_user("ann"), "SELEC 1", &[]).is_err());
+    assert_eq!(ids(&db, &[]), [text("a2")]);
+    assert_eq!(ids(&db, &as_user("bob")), [text("a2"), text("b1")]);
+}
+
+#[test]
+fn only_punk_settings_can_be_given() {
+    let Some(db) = pool("settings", NOTES) else {
+        return;
+    };
+    let e = db
+        .run_as(
+            &[("role".to_owned(), "postgres".to_owned())],
+            "SELECT 1 AS one",
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(e.code, "42602");
+}
+
+#[test]
+fn a_role_that_skips_row_level_security_is_refused() {
+    let Ok(url) = std::env::var("PUNK_TEST_POSTGRES") else {
+        return;
+    };
+    // The test database's own role is a superuser.
+    let db = Postgres::new(&url, 1).unwrap();
+    let e = db.run("SELECT 1 AS one", &[]).unwrap_err();
+    assert_eq!(e.code, "42501");
+    assert!(e.message.contains("row-level security"), "{}", e.message);
+    assert_eq!(db.state.lock().unwrap().open, 0);
 }

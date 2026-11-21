@@ -11,6 +11,12 @@
 //! - Each parameter gets the type the statement wants (an `Int` for an `int4` column is sent as
 //!   an `int4`); each column is read as bool, int, float or text. Any other type is an error that
 //!   says how to convert it in the SQL.
+//! - Row-level security holds: the pool refuses a role that skips it (a superuser, or a role
+//!   with `BYPASSRLS`), so the app runs as a role that the tables' policies apply to. The tables
+//!   and their policies are made by [`Owner`], with a role of its own.
+//! - `Db.runAs! user query` runs the query in a transaction whose settings (`punk.user_id`) say
+//!   who the user is; the policies read them. They end with the transaction, so the next query
+//!   on the connection is nobody's again.
 //! - Without TLS for now: for a database on the same machine or a private network.
 
 use std::collections::HashMap;
@@ -24,6 +30,9 @@ use postgres::config::Host;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::types::{IsNull, ToSql, Type, to_sql_checked};
 use postgres::{Client, NoTls, Statement};
+
+/// A connection string, read with `str::parse` and changed with its setters.
+pub use postgres::Config;
 use punk_server::{Database, DbError, Rows, Value};
 
 /// How many prepared statements a connection keeps; past that it starts again.
@@ -53,13 +62,19 @@ impl Postgres {
     /// `host=localhost user=app dbname=links`), with at most `max` connections. It connects when
     /// the first query comes, so it can be made while the database is still starting.
     pub fn new(url: &str, max: usize) -> Result<Self, DbError> {
-        let mut config: postgres::Config = url.parse().map_err(|e: postgres::Error| {
+        let config: postgres::Config = url.parse().map_err(|e: postgres::Error| {
             DbError::new("08000", format!("bad connection string: {e}"))
         })?;
+        Ok(Self::from_config(config, max))
+    }
+
+    /// The same, for a connection string that [`postgres::Config`] already holds (to change its
+    /// user, for instance).
+    pub fn from_config(mut config: postgres::Config, max: usize) -> Self {
         if config.get_connect_timeout().is_none() {
             config.connect_timeout(Duration::from_secs(5));
         }
-        Ok(Self {
+        Self {
             config,
             max: max.max(1),
             wait: Duration::from_secs(5),
@@ -68,11 +83,11 @@ impl Postgres {
                 open: 0,
             }),
             freed: Condvar::new(),
-        })
+        }
     }
 
-    /// Runs SQL that isn't the app's: the wiring's schema, for instance. Several statements,
-    /// separated by `;`, without parameters.
+    /// Runs SQL that isn't the app's, as the app's role: setting up a test, for instance.
+    /// Several statements, separated by `;`, without parameters.
     pub fn batch(&self, sql: &str) -> Result<(), DbError> {
         let mut conn = self.take()?;
         let result = conn.client.batch_execute(sql).map_err(db_error);
@@ -90,14 +105,19 @@ impl Postgres {
             if state.open < self.max {
                 state.open += 1;
                 drop(state);
-                return match self.config.connect(NoTls) {
+                return match self
+                    .config
+                    .connect(NoTls)
+                    .map_err(db_error)
+                    .and_then(checked)
+                {
                     Ok(client) => Ok(Connection {
                         client,
                         statements: HashMap::new(),
                     }),
                     Err(e) => {
                         self.closed();
-                        Err(db_error(e))
+                        Err(e)
                     }
                 };
             }
@@ -139,11 +159,190 @@ impl Postgres {
 
 impl Database for Postgres {
     fn run(&self, sql: &str, params: &[Value]) -> Result<Rows, DbError> {
+        self.run_as(&[], sql, params)
+    }
+
+    fn run_as(
+        &self,
+        settings: &[(String, String)],
+        sql: &str,
+        params: &[Value],
+    ) -> Result<Rows, DbError> {
         let mut conn = self.take()?;
-        let result = run(&mut conn, sql, params);
+        let result = if settings.is_empty() {
+            run(&mut conn, sql, params)
+        } else {
+            run_with_settings(&mut conn, settings, sql, params)
+        };
         self.give_back(conn);
         result
     }
+}
+
+/// The query in a transaction with these settings, which end with it.
+fn run_with_settings(
+    conn: &mut Connection,
+    settings: &[(String, String)],
+    sql: &str,
+    params: &[Value],
+) -> Result<Rows, DbError> {
+    for (name, _) in settings {
+        if !name.starts_with("punk.") {
+            return Err(DbError::new(
+                "42602",
+                format!("the setting {name:?} isn't one of punk's"),
+            ));
+        }
+    }
+    conn.client.batch_execute("BEGIN").map_err(db_error)?;
+    let result = (|| {
+        for (name, value) in settings {
+            conn.client
+                .execute(
+                    "SELECT set_config($1, $2, true)",
+                    &[&name.as_str(), &value.as_str()],
+                )
+                .map_err(db_error)?;
+        }
+        let rows = run(conn, sql, params)?;
+        conn.client.batch_execute("COMMIT").map_err(db_error)?;
+        Ok(rows)
+    })();
+    if result.is_err() && !conn.client.is_closed() {
+        // A failed ROLLBACK leaves the connection broken: it is dropped when given back.
+        let _ = conn.client.batch_execute("ROLLBACK");
+    }
+    result
+}
+
+/// A new connection, if its role keeps to row-level security: a superuser and a role with
+/// `BYPASSRLS` see every row, whatever the policies say.
+fn checked(mut client: Client) -> Result<Client, DbError> {
+    let row = client
+        .query_one(
+            "SELECT rolname::text, rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+            &[],
+        )
+        .map_err(db_error)?;
+    let role: String = row.get(0);
+    let bypasses: bool = row.get(1);
+    if bypasses {
+        return Err(DbError::new(
+            "42501",
+            format!(
+                "the app connects as the role {role:?}, which skips row-level security (it is a superuser or has BYPASSRLS); give the app a role of its own, and make the tables with `Owner`"
+            ),
+        ));
+    }
+    Ok(client)
+}
+
+/// The owner of the app's tables: a connection with a role that may make tables and policies,
+/// for the wiring, not for the app. It applies the schema punk made (`punk check --schema`) and
+/// lets the app's role use the tables; the policies say which rows.
+pub struct Owner {
+    client: Mutex<Client>,
+}
+
+impl Owner {
+    pub fn connect(url: &str) -> Result<Self, DbError> {
+        let mut config: postgres::Config = url.parse().map_err(|e: postgres::Error| {
+            DbError::new("08000", format!("bad connection string: {e}"))
+        })?;
+        if config.get_connect_timeout().is_none() {
+            config.connect_timeout(Duration::from_secs(5));
+        }
+        let client = config.connect(NoTls).map_err(db_error)?;
+        Ok(Self {
+            client: Mutex::new(client),
+        })
+    }
+
+    /// Runs SQL without parameters: the schema, or anything else the wiring sets up.
+    pub fn batch(&self, sql: &str) -> Result<(), DbError> {
+        let mut client = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        client.batch_execute(sql).map_err(db_error)
+    }
+
+    /// Lets `role` read and change the tables of the current schema, now and the ones made later,
+    /// as far as their policies allow.
+    pub fn grant(&self, role: &str) -> Result<(), DbError> {
+        let role = quote_ident(role);
+        let schema = self.schema()?;
+        self.batch(&format!(
+            "GRANT USAGE ON SCHEMA {schema} TO {role};
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {role};
+             ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role};"
+        ))
+    }
+
+    fn schema(&self) -> Result<String, DbError> {
+        let mut client = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        let row = client
+            .query_one("SELECT current_schema()::text", &[])
+            .map_err(db_error)?;
+        Ok(quote_ident(&row.get::<_, String>(0)))
+    }
+}
+
+/// For tests against a real database: `PUNK_TEST_POSTGRES` is its connection string, as a role
+/// that may make schemas and roles (CI's `postgres`).
+pub mod testing {
+    use super::*;
+
+    /// The role the app connects as in tests: it keeps to row-level security.
+    pub const APP_ROLE: &str = "punk_test_app";
+
+    /// A fresh, empty schema `schema` of the test database, with its owner (who has applied
+    /// `schema_sql`) and a pool for the app, as [`APP_ROLE`]. `None` when there is no test
+    /// database, unless `PUNK_REQUIRE_POSTGRES` is set (as in CI): then it panics.
+    pub fn database(schema: &str, schema_sql: &str) -> Option<(Owner, Postgres)> {
+        let Ok(url) = std::env::var("PUNK_TEST_POSTGRES") else {
+            assert!(
+                std::env::var_os("PUNK_REQUIRE_POSTGRES").is_none(),
+                "PUNK_REQUIRE_POSTGRES is set, but PUNK_TEST_POSTGRES isn't"
+            );
+            eprintln!("no PUNK_TEST_POSTGRES: skipping {schema}");
+            return None;
+        };
+        let setup = Owner::connect(&url).unwrap();
+        setup
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+                 DO $$ BEGIN
+                     CREATE ROLE {APP_ROLE} LOGIN PASSWORD 'punk';
+                 EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+                 END $$;"
+            ))
+            .unwrap();
+        let url = with_search_path(&url, schema);
+        let owner = Owner::connect(&url).unwrap();
+        owner.batch(schema_sql).unwrap();
+        owner.grant(APP_ROLE).unwrap();
+        let mut config: Config = url.parse().unwrap();
+        // Without a database name, Postgres takes the user's: keep the one of the URL.
+        if config.get_dbname().is_none() {
+            let dbname = config.get_user().unwrap_or("postgres").to_owned();
+            config.dbname(&dbname);
+        }
+        config.user(APP_ROLE).password("punk");
+        Some((owner, Postgres::from_config(config, 2)))
+    }
+
+    /// `url` with `schema` as its search path.
+    fn with_search_path(url: &str, schema: &str) -> String {
+        if url.contains("://") {
+            let separator = if url.contains('?') { "&" } else { "?" };
+            format!("{url}{separator}options=-c%20search_path%3D{schema}")
+        } else {
+            format!("{url} options='-c search_path={schema}'")
+        }
+    }
+}
+
+/// `name` as an SQL identifier, in double quotes.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// What the pool reaches: the port of each host in the connection string, and the resolver when

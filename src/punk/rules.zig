@@ -14,7 +14,7 @@
 //! | P401 | a `table` has a row type that can be stored, a key it has, and says who may read, insert, update and delete |
 //! | P402 | a query is a pipeline from a table, and its functions can run in the database |
 //! | P403 | a query uses columns the table has, with values of their type |
-//! | P404 | a query only does what the table's policy allows |
+//! | P404 | a query only does what the table's policy allows, and `Db.runAs!` only where a policy looks at the user |
 
 /// One rule of the punk check layer.
 pub const Rule = enum {

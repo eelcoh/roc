@@ -12,7 +12,9 @@ import Postgres
 ##             |> Db.first
 ##
 ## punk compiles each pipeline to one SQL statement with parameters, and the
-## rows it gives to a decoder for the type of its result. `Db.filter`,
+## rows it gives to a decoder for the type of its result. `Db.run! query`
+## runs it as nobody; `Db.runAs! user query` as the user, for the tables
+## whose policies look at the user. `Db.filter`,
 ## `Db.map`, `Db.all`, `Db.first`, `Db.insert`, `Db.insertIfNew`, `Db.update`
 ## and `Db.delete` exist only in punk: the functions below are what punk
 ## writes for them, so a program never calls them itself.
@@ -23,8 +25,14 @@ Db := [].{
 
     ## Runs the query on the app's database. In punk `Db.run! query`.
     run! : Query(a) => Try(a, [PgErr({ code : Str, message : Str }), RowErr(Str)])
-    run! = |query| {
-        result = Postgres.run_host!(Sql.to_params(query.sql), Sql.to_sql(query.sql))
+    run! = |query| run_as!([], query)
+
+    ## What punk writes for `Db.runAs! user query`: runs the query with the
+    ## fields of the user that the tables' policies look at, as settings of
+    ## its transaction (`("punk.user_id", user.id)`).
+    run_as! : List((Str, Str)), Query(a) => Try(a, [PgErr({ code : Str, message : Str }), RowErr(Str)])
+    run_as! = |settings, query| {
+        result = Postgres.run_host!(settings, Sql.to_params(query.sql), Sql.to_sql(query.sql))
         if result.ok {
             match (query.read)(result.columns, result.rows, result.affected) {
                 Ok(value) => Ok(value)
@@ -91,6 +99,18 @@ Db := [].{
 
     read_nullable : Row.Column(a) -> Row.Column([Just(a), Nothing])
     read_nullable = |column| Row.nullable(column)
+
+    setting_text : Str, Str -> (Str, Str)
+    setting_text = |name, value| (name, value)
+
+    setting_int : Str, I64 -> (Str, Str)
+    setting_int = |name, value| (name, value.to_str())
+
+    setting_float : Str, F64 -> (Str, Str)
+    setting_float = |name, value| (name, value.to_str())
+
+    setting_bool : Str, Bool -> (Str, Str)
+    setting_bool = |name, value| (name, if value "true" else "false")
 
     param_text : Str -> Sql.Param
     param_text = |value| Sql.text(value)
