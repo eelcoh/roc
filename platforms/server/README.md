@@ -64,7 +64,9 @@ examples/punk/shortener/
         build.rs            runs `punk build` on Shortener.punk, links libapp.a
         src/lib.rs          init(clock, random, kv, config): the app as an ambit Handler
         src/main.rs         the wiring: native store, clock, randomness, lockdown, port
+        src/hermit.rs       the wiring as a Hermit unikernel (ambit's hermit backend)
         tests/spec.rs       ambit's spec/tests/shortener.rs, copied unchanged
+        acceptance.sh       ambit's black-box HTTP tests, native or hermit
 ```
 
 ```
@@ -76,6 +78,24 @@ cargo run --release         # http://localhost:8080
 
 `build.rs` uses `zig-out/bin/punk` of this repository, or the compiler named
 by the `PUNK` environment variable.
+
+### As a unikernel
+
+The same app runs as a [Hermit](https://hermit-os.org) unikernel, on ambit's
+hermit backend. For `x86_64-unknown-hermit`, `build.rs` compiles the app for
+`x64v1elf` (freestanding x86-64 at the baseline CPU level: Hermit's QEMU CPU
+model has no AVX), and `src/hermit.rs` does the wiring as ambit's
+`run-hermit` does: an in-memory store (links are lost when the VM stops),
+the hardware random generator, and port 8080 over virtio-net.
+
+```
+cargo build --release --target x86_64-unknown-hermit   # a 1.8 MB image
+./acceptance.sh hermit      # boots it in QEMU and runs ambit's HTTP tests
+```
+
+Setup (the Rust std for Hermit, QEMU, the loader) as in
+`platforms/cli/hermit/README.md`. Nothing has to be locked down: the image is
+the whole machine, and the only way in is the port.
 
 ## How the host fits together
 
@@ -105,4 +125,4 @@ shortener checks it too).
 - `Kv.scan` (ambit has it): no app needed it yet.
 - A typed configuration instead of `Config.text!`: the platform would need a
   type variable for it, and the JSON decoder does the job.
-- Running on hermit (ambit's unikernel backend): a separate spike.
+- A store that survives a restart on hermit (ambit has none there yet either).

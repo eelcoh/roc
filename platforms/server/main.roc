@@ -24,6 +24,7 @@ platform ""
         arm64musl: { inputs: [app], output: Archive },
         x64mac: { inputs: [app], output: Archive },
         arm64mac: { inputs: [app], output: Archive },
+        x64v1elf: { inputs: [app], output: Archive },
     }
 
 import Http

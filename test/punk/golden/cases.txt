@@ -34,3 +34,4 @@ platform/io-file        platform/io.punk            -           lines.txt
 platform/io-missing     platform/io.punk            -           does-not-exist.txt
 platform/lines          platform/lines.punk         lines.txt   numbered.txt
 platform/caps           platform/caps.punk          -           out.txt
+hermit/hello            hermit/hello.punk
