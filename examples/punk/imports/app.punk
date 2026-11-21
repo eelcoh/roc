@@ -3,6 +3,8 @@ app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
 import pf.Stdout
 import Math
 import Shape
+import Text
+import Report
 
 main! = fn () ->
     Stdout.line! "double 21 = ${I64.toStr (Math.double 21)}"
@@ -10,3 +12,19 @@ main! = fn () ->
     [Shape.Circle 1.0, Shape.Rect 2.0 3.0]
         |> List.map Shape.describe
         |> List.forEach! Stdout.line!
+
+    -- Partial application of a function from another punkroc module.
+    [1, 2, 3]
+        |> List.map (Math.add 10)
+        |> List.map I64.toStr
+        |> Str.joinWith ", "
+        |> Stdout.line!
+
+    -- A Roc module: its first argument comes last, so |> works.
+    "ab"
+        |> Text.repeat 3
+        |> Text.withPrefix "> "
+        |> Stdout.line!
+
+    -- A Roc module that uses a punkroc module.
+    Stdout.line! (Report.summary [1, 2, 3])

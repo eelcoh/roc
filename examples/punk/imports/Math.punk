@@ -1,12 +1,20 @@
-module Math exposing (double, sumOfSquares)
+module Math exposing (add, double, sumOfSquares)
 
 {-| Twice the number. -}
 double : I64 -> I64
 double = fn x ->
     x * 2
 
+add : I64 -> I64 -> I64
+add = fn a, b ->
+    a + b
+
+{-| Not exposed: `Math.square` is an error in other punkroc modules. -}
+square = fn x ->
+    x * x
+
 sumOfSquares : List I64 -> I64
 sumOfSquares = fn xs ->
     xs
-        |> List.map (fn x -> x * x)
+        |> List.map square
         |> List.sum

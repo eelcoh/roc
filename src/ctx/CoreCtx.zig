@@ -203,10 +203,20 @@ pub fn readFile(self: Self, path: []const u8, allocator: Allocator) ReadError![]
     const data = try self.vtable.readFile(self.ctx, self.std_io, path, allocator);
     if (!punk.isPunkPath(path)) return data;
     defer allocator.free(data);
-    return punk.toRoc(allocator, path, data) catch |err| switch (err) {
+    // The translator reads the modules a file imports for their interfaces.
+    var self_copy = self;
+    const reader: punk.Reader = .{ .ctx = &self_copy, .read = readRawForPunk };
+    return punk.toRocWith(allocator, path, data, reader) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.ParseError => error.IoError,
     };
+}
+
+/// Reads a source file as it is on disk, for the punkroc translator.
+fn readRawForPunk(ctx: ?*anyopaque, allocator: Allocator, path: []const u8) ?[]u8 {
+    const self: *const Self = @ptrCast(@alignCast(ctx.?));
+    if (!self.fileExists(path)) return null;
+    return self.vtable.readFile(self.ctx, self.std_io, path, allocator) catch null;
 }
 
 /// Read `path` into `buffer`. Returns bytes read.
