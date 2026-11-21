@@ -1,16 +1,24 @@
-app [main!] { pf: platform "../../../test/punk/platform/main.roc" }
+app [main!] { pf: platform "../../../platforms/cli/main.roc" }
 
 import pf.Stdout
 import pf.Stdin
 import pf.File
+import pf.Arg
 
-{-| Reads standard input line by line and writes it, numbered, to a file. -}
+{-| Reads standard input line by line and writes it, numbered, to the file
+named on the command line: `lines.punk numbered.txt < input.txt`. The
+platform only lets a program write a file the user named.
+-}
 
 main! = fn () ->
-    numbered = readLines! 1 []
-    case File.write! "numbered.txt" (String.join "\n" numbered) of
-        Ok {} -> Stdout.line! "wrote ${String.fromInt (List.length numbered)} lines to numbered.txt"
-        Err (FileErr msg) -> Stdout.line! msg
+    case Arg.list! () of
+        [path] ->
+            numbered = readLines! 1 []
+            case File.write! path (String.join "\n" numbered) of
+                Ok {} -> Stdout.line! "wrote ${String.fromInt (List.length numbered)} lines to ${path}"
+                Err (FileErr msg) -> Stdout.line! msg
+        _ ->
+            Stdout.line! "give me the file to write"
 
 readLines! = fn n, acc ->
     line = Stdin.line! ()

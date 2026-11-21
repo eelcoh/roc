@@ -357,9 +357,11 @@ so `a + b` still crashes on overflow, as in Roc.
 
 ## A platform of its own
 
-`test/punk/platform` is a small platform for punkroc programs: `Stdout`,
+`platforms/cli` is punkroc's platform for command-line programs: `Stdout`,
 `Stderr`, `Stdin.line!` and `Stdin.readAll!`, `File.read!` and
-`File.write!`, and `Arg.list!`. See `test/punk/README.md`.
+`File.write!` (only for files named on the command line), `Arg.list!`,
+`Clock` and `Random`. Its host is Rust, on ambit's cli platform. See
+`platforms/cli/README.md`.
 
 ## Smaller Elm habits
 

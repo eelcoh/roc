@@ -1,4 +1,4 @@
-app [main!] { pf: platform "../../../test/punk/platform/main.roc" }
+app [main!] { pf: platform "../../../platforms/cli/main.roc" }
 
 import pf.Stdout
 import pf.Stdin

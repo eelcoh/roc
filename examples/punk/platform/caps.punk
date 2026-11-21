@@ -1,0 +1,29 @@
+app [main!] { pf: platform "../../../platforms/cli/main.roc" }
+
+import pf.Stdout
+import pf.File
+import pf.Clock
+import pf.Random
+
+{-| The capabilities of punkroc's cli platform: the clock, randomness, and
+only the files named on the command line. Run with `out.txt` as argument.
+-}
+
+main! = fn () ->
+    Stdout.line! "clock after 2026: ${yesNo (Clock.now! () > 1767225600000)}"
+    Stdout.line! "elapsed is small: ${yesNo (Clock.elapsed! () < 60000)}"
+    Stdout.line! "two random numbers differ: ${yesNo (Random.u64! () != Random.u64! ())}"
+    report! "write out.txt" (File.write! "out.txt" "written by caps.punk\n")
+    report! "write secret.txt" (File.write! "secret.txt" "not allowed")
+    case File.read! "out.txt" of
+        Ok text -> Stdout.write! "read out.txt: ${text}"
+        Err (FileErr msg) -> Stdout.line! msg
+
+yesNo : Bool -> Str
+yesNo = fn answer ->
+    if answer then "yes" else "no"
+
+report! = fn what, result ->
+    case result of
+        Ok _ -> Stdout.line! "${what}: ok"
+        Err (FileErr msg) -> Stdout.line! "${what}: ${msg}"

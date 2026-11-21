@@ -1,2 +1,2 @@
-could not read does-not-exist.txt: FileNotFound
+could not read does-not-exist.txt: no such file
 exit 0

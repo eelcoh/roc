@@ -1,8 +1,8 @@
 # punkroc's own CI (not upstream Roc's):
 #
-# - golden: on every push to and PR into `punkroc`, build the compiler, run
-#   the translator's unit tests and the golden tests of examples/punk/
-#   (test/punk/golden.sh).
+# - golden: on every push to and PR into `punkroc`, build the compiler and
+#   the Rust host of platforms/cli, run the translator's and the host's unit
+#   tests and the golden tests of examples/punk/ (test/punk/golden.sh).
 # - upstream: on the 1st and 15th of each month (and by hand), merge
 #   roc-lang/roc's main into a new branch, run the same tests on it, and open
 #   a PR into `punkroc` only when they pass. On a conflict or a failing test
@@ -52,6 +52,7 @@ jobs:
         run: |
           set -eu
           zig test src/punk/test.zig
+          (cd platforms/cli/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
@@ -102,6 +103,7 @@ jobs:
         run: |
           set -eu
           zig test src/punk/test.zig
+          (cd platforms/cli/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
