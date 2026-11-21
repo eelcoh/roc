@@ -24,7 +24,7 @@ platform ""
         arm64mac: { inputs: ["libhost.a", app] },
         x64musl: { inputs: ["rcrt1.o", "libhost.a", app, "libunwind.a", "libc.a"] },
         arm64musl: { inputs: ["rcrt1.o", "libhost.a", app, "libunwind.a", "libc.a"] },
-        x64v1elf: { inputs: [app] },
+        x64v1elf: { inputs: [app], output: Archive },
     }
 
 import Arg

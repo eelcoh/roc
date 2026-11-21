@@ -19,16 +19,15 @@ Toeval: 13954704459202334297
 
 ## How it works
 
-1. `punk build --target=x64v1elf --keep-temp` compiles the app to two ELF
-   objects (the app, and its static data). They need nothing from a C library:
-   only `roc_alloc`, `roc_dealloc`, `roc_crashed` and the hosted functions.
-   roc can't link a Hermit image itself, so the build stops at "missing host
-   symbols". That's expected: `run.sh` takes the objects from the kept
-   temporary directory.
+1. `punk build --target=x64v1elf --output=.../libapp.a` compiles the app to a
+   static archive: the cli platform's `x64v1elf` target has
+   `{ inputs: [app], output: Archive }`, so roc doesn't link. The archive holds
+   the app and its static data, and needs nothing from a C library: only
+   `roc_alloc`, `roc_dealloc`, `roc_crashed` and the hosted functions.
 2. `cargo build --target x86_64-unknown-hermit` builds this crate: the same C
    ABI as the cli host, with the cli host's own `roc.rs` for memory and Roc's
    values, Rust std, and the Hermit kernel (the `hermit` crate builds it from
-   source). `build.rs` links the app's objects in (`PUNK_APP_OBJECTS`).
+   source). `build.rs` links `libapp.a` in (`PUNK_APP_OBJECTS`).
 3. QEMU boots the image with Hermit's loader.
 
 The baseline CPU level (`x64v1elf`) matters: with `x64elf` (AVX2) the app
@@ -55,9 +54,6 @@ The same as ambit's hermit backend:
   for Hermit. The effects here are plain std: output to the serial console, the
   clock, randomness (rdseed). Stdin is empty, there are no arguments and no
   files. A real unikernel platform is `punk/server` on `ambit-server-hermit`.
-- roc doesn't link the image; `run.sh` gets the objects through `--keep-temp`.
-  To make that proper, roc needs a way to emit the app object only, or a
-  platform target whose link step is "hand the objects to cargo".
 - Apps that need roc's embedded runtime objects (for example compiler-rt
   functions) weren't seen: the examples tried all linked with only the two
-  objects. If one does, take those objects from the kept directory too.
+  objects in the archive.

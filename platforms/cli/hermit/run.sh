@@ -10,22 +10,15 @@ set -euo pipefail
 app=${1:?"usage: run.sh app.punk"}
 here=platforms/cli/hermit
 
-# 1. The app as objects, for freestanding x86-64 at the baseline CPU level (x64v1elf): Hermit's
-#    QEMU CPU model has no AVX. roc can't link a Hermit image itself, so the build stops at
-#    "missing host symbols" (that's expected) and --keep-temp keeps the objects it made.
-out=$(zig-out/bin/punk build --target=x64v1elf --keep-temp --output=/dev/null "$app" 2>&1 || true)
-dir=$(printf '%s\n' "$out" | grep -A2 'Kept temporary directory' | grep -o '[^ ]*/roc/tmp/[0-9a-f]*' | head -n 1 || true)
-if [ -z "$dir" ] || ! printf '%s\n' "$out" | grep -q 'missing host symbols'; then
-    printf '%s\n' "$out"
-    echo "run.sh: roc did not make the app's objects (see above)"
-    exit 1
-fi
-case $dir in /*) ;; *) dir="$PWD/$dir" ;; esac
-objects=$(ls "$dir"/*.o | tr '\n' ' ')
+# 1. The app as a static archive, for freestanding x86-64 at the baseline CPU level (x64v1elf):
+#    Hermit's QEMU CPU model has no AVX. The cli platform's x64v1elf target has
+#    `output: Archive`, so roc doesn't link: cargo links the image.
+mkdir -p "$here/target"
+archive=$PWD/$here/target/libapp.a
+zig-out/bin/punk build --target=x64v1elf --output="$archive" "$app"
 
-# 2. The image: the hermit host (Rust std + kernel) with the app's objects linked in.
-(cd "$here" && PUNK_APP_OBJECTS="$objects" cargo build --release --target x86_64-unknown-hermit)
-rm -rf "$dir"
+# 2. The image: the hermit host (Rust std + kernel) with the app linked in.
+(cd "$here" && PUNK_APP_OBJECTS="$archive" cargo build --release --target x86_64-unknown-hermit)
 image=$here/target/x86_64-unknown-hermit/release/punk-cli-hermit
 ls -l "$image"
 
