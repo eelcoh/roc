@@ -944,6 +944,12 @@ const Parser = struct {
     fn parseOperand(p: *Parser) Error!*Expr {
         const t = p.tok();
         if (p.atStop()) return p.errAt(t, "expected an expression but found '{s}'", .{describe(t)});
+        if (isTryWord(t)) {
+            // `try f a b` is Roc's `f(a, b)?`: stop with the Err if it fails.
+            _ = p.advance();
+            if (p.atStop() or !p.isAtomStart()) return p.errAt(p.tok(), "expected a call after 'try' but found '{s}'", .{describe(p.tok())});
+            return p.new(Expr, .{ .try_ = try p.parseApplication() });
+        }
         switch (t.tag) {
             .kw_fn => return p.parseLambda(),
             .kw_if => return p.parseIf(),
@@ -967,6 +973,8 @@ const Parser = struct {
     fn isAtomStart(p: *Parser) bool {
         if (p.atStop()) return false;
         const t = p.tok();
+        // `try` starts a new operand, never an argument: `f (try g x)`.
+        if (isTryWord(t)) return false;
         return switch (t.tag) {
             .lower, .upper, .qlower, .int, .float, .string, .char, .lparen, .lbrack, .lbrace, .underscore => true,
             // `List.map .name people`: an accessor function as an argument
@@ -976,6 +984,12 @@ const Parser = struct {
                 (p.peekAt(1).tag == .int or p.peekAt(1).tag == .float or p.peekAt(1).tag == .lower),
             .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
         };
+    }
+
+    /// `try` is a word, not a `?`: it stands in front of the call that can
+    /// fail, so the early exit is visible at the start of the line.
+    fn isTryWord(t: Token) bool {
+        return t.tag == .lower and std.mem.eql(u8, t.text, "try");
     }
 
     fn parseApplication(p: *Parser) Error!*Expr {
@@ -990,9 +1004,8 @@ const Parser = struct {
                 e = try p.new(Expr, .{ .app = .{ .func = head, .args = args.items } });
             }
         }
-        if (p.at(.question) and !p.tok().space_before) {
-            _ = p.advance();
-            e = try p.new(Expr, .{ .try_ = e });
+        if (p.at(.question)) {
+            return p.errAt(p.tok(), "punkroc uses 'try f x' instead of 'f x?': put 'try' in front of the call that can fail", .{});
         }
         return e;
     }

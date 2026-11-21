@@ -90,7 +90,7 @@ named function). `Dict.fold` passes key, value, state. Both orders then fit
 text                                    List.map_try(
     |> Str.trim                             Str.split_on(Str.trim(text), ","),
     |> Str.splitOn ","                      parse_range,
-    |> List.mapTry parseRange?          )?
+    |> try List.mapTry parseRange       )?
 ```
 
 `Result.map`, `Result.mapError` and `Result.withDefault` are Roc's
@@ -173,6 +173,24 @@ Roc modules off.
 `examples/punk/imports/` has all three directions: `app.punk` uses the
 punkroc modules `Math` and `Shape`, the Roc module `Text.roc`, and
 `Report.roc`, a Roc module that uses `Math.punk`.
+
+## `try` instead of `?`
+
+A call that may stop the function with an `Err` starts with the word `try`,
+so the early exit is visible at the front of the line instead of hidden in a
+trailing `?`:
+
+```
+-- punkroc                              # Roc
+x = try U64.fromStr a                   x = U64.from_str(a)?
+Ok (try parse a, try parse b)           Ok((parse(a)?, parse(b)?))
+input |> try List.mapTry parseRange     List.map_try(input, parse_range)?
+```
+
+`try` takes one call with its arguments (`try f a + 1` is `(try f a) + 1`);
+use parentheses for more: `try (s |> Str.trim |> parse)`. In a pipeline
+`|> try f a` checks the result after piping. A postfix `?` is a syntax error
+that points to `try`.
 
 ## Smaller Elm habits
 
