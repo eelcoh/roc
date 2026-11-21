@@ -16,6 +16,12 @@ case $backend in
     cargo build -q --locked --release
     ./target/release/punk-shortener >"$log" 2>&1 & ;;
   hermit)
+    sysroot=$(rustup run 1.97.1 rustc --print sysroot 2>/dev/null || true)
+    if [ ! -d "$sysroot/lib/rustlib/x86_64-unknown-hermit" ]; then
+      echo "Rust 1.97.1 has no std for x86_64-unknown-hermit: see 'Setup' in platforms/cli/hermit/README.md"
+      exit 1
+    fi
+    command -v qemu-system-x86_64 >/dev/null || { echo "qemu-system-x86_64 is not installed"; exit 1; }
     cargo build -q --locked --release --target x86_64-unknown-hermit
     # Loader v0.5.6 matches hermit 0.13.2; v0.5.7 panics in early paging with this kernel.
     loader=target/hermit-loader-x86_64-v0.5.6
@@ -23,7 +29,7 @@ case $backend in
       https://github.com/hermit-os/loader/releases/download/v0.5.6/hermit-loader-x86_64
     accel=()
     [ -w /dev/kvm ] && accel=(-enable-kvm)
-    qemu-system-x86_64 "${accel[@]}" \
+    qemu-system-x86_64 ${accel[@]+"${accel[@]}"} \
       -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
       -smp 1 -m 64M -display none -serial stdio \
       -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
