@@ -320,6 +320,7 @@ Positions are 1-based and in the `.punk` file. `code` is stable:
 | `P101` | `crash` outside an `expect`: return a `Result` or `Maybe` instead |
 | `P102` | `dbg` outside an `expect` |
 | `P201` | an exposed value of a module has no type annotation |
+| `P301` | the SQL of `Sql.query` is not a string literal: pass values as parameters (`$1`) |
 | `roc/<title>` | a problem the type checker found, such as `roc/type-mismatch`, `roc/name-not-in-scope`, `roc/missing-method` |
 
 Warnings (`severity: "warning"`) do not stop the program. A warning
@@ -388,6 +389,50 @@ the world: no files, no network, no environment. It is not run with
 `punk app.punk`: `punk build` makes an archive that a small Rust crate links
 and tests (see `platforms/server/README.md` and `examples/punk/shortener/`).
 Annotate an effect with more arguments as `Settings -> Str => Result Response _`.
+
+### Postgres
+
+The database the wiring gives the app. A query is SQL written in the program
+plus its parameters (`$1`, `$2`, ...); a row decoder reads the rows, as
+`json.Decode` reads JSON. The SQL of `Sql.query` has to be a string literal
+without `${...}` (rule P301): values always go in as parameters.
+
+```
+import pf.Postgres
+import pf.Sql
+import pf.Row
+
+linkRow : Row.Decoder Link
+linkRow =
+    Row.map2 (fn created, url -> { created, url })
+        (Row.field "created" Row.int)
+        (Row.field "url" Row.text)
+
+findLink : Str -> Sql.Query
+findLink = fn id ->
+    Sql.query "SELECT created, url FROM links WHERE id = $1" [Sql.text id]
+
+-- in an effect: case try Postgres.row! linkRow (findLink id) of ...
+```
+
+```
+Sql.query : Str -> List Sql.Param -> Sql.Query      -- the Str must be a literal (P301)
+Sql.text : Str -> Sql.Param                        -- also Sql.int (Int), Sql.float, Sql.bool, Sql.null
+Sql.nullable : (a -> Sql.Param) -> Maybe a -> Sql.Param
+Row.field : Str -> Row.Column a -> Row.Decoder a   -- by column name
+Row.int, Row.float, Row.text, Row.bool : Row.Column _   -- Row.nullable : Row.Column a -> Row.Column (Maybe a)
+Row.map, Row.map2 ... Row.map5, Row.succeed, Row.fail, Row.andThen
+Postgres.rows! : Row.Decoder a -> Sql.Query => Result (List a) _
+Postgres.row! : Row.Decoder a -> Sql.Query => Result (Maybe a) _      -- more than one row is a RowErr
+Postgres.execute! : Sql.Query => Result U64 _                         -- the number of rows changed
+-- errors: PgErr { code : Str, message : Str } (code is the SQLSTATE, "23505" = unique violation), RowErr Str
+```
+
+Columns are read as bool, int (`int2/4/8`), float (`float4/8`) or text
+(`text`, `varchar`); convert anything else in the SQL (`created::text`,
+`extract(epoch from t)::int8`). A parameter must have the type the query
+expects (`Sql.int` for an `integer` column). Each query commits on its own:
+there are no transactions yet.
 
 ### JSON: the `json` package
 
@@ -464,6 +509,10 @@ Written by an agent that had only this file, on the first try.
 ### A server: ambit's link shortener
 
 @@example shortener/Shortener.punk@@
+
+### The same shortener with its links in Postgres
+
+@@example shortener-postgres/Shortener.punk@@
 
 ## Style
 

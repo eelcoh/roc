@@ -10,12 +10,14 @@
 //! | P101 | `crash` only inside an `expect` test |
 //! | P102 | `dbg` only inside an `expect` test |
 //! | P201 | what a module exposes has a type annotation |
+//! | P301 | the SQL of `Sql.query` is text written in the program |
 
 /// One rule of the punk check layer.
 pub const Rule = enum {
     crash_outside_test,
     dbg_outside_test,
     exposed_without_annotation,
+    sql_not_literal,
 
     /// The rule's stable code, such as `P101`.
     pub fn code(r: Rule) []const u8 {
@@ -23,6 +25,7 @@ pub const Rule = enum {
             .crash_outside_test => "P101",
             .dbg_outside_test => "P102",
             .exposed_without_annotation => "P201",
+            .sql_not_literal => "P301",
         };
     }
 };

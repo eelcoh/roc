@@ -336,6 +336,7 @@ tool or an agent can recognise it without reading the text
 | `P101` | `crash` is only allowed inside an `expect` test. A program returns a `Result` or `Maybe` instead of stopping halfway. |
 | `P102` | `dbg` is only allowed inside an `expect` test, so no debug output stays behind. |
 | `P201` | Everything a module exposes has a type annotation (with `exposing (..)`: every top-level value). Apps are exempt: the platform fixes the type of `main!`. |
+| `P301` | The SQL of `Sql.query` (server platform) is a string literal without `${...}`, and `Sql.query` is only used by calling it. Values go in as parameters (`$1`), so no request can change what a query does. |
 
 ```
 Day01.punk:12:9: P101: 'crash' is only allowed inside an 'expect' test. A program must not stop halfway: ...

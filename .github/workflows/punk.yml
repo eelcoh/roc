@@ -2,7 +2,8 @@
 #
 # - golden: on every push to and PR into `punkroc`, build the compiler and
 #   the Rust host of platforms/cli, run the translator's and the host's unit
-#   tests and the golden tests of examples/punk/ (test/punk/golden.sh).
+#   tests and the golden tests of examples/punk/ (test/punk/golden.sh), and
+#   the Postgres tests against a postgres:16 service container.
 # - upstream: on the 1st and 15th of each month (and by hand), merge
 #   roc-lang/roc's main into a new branch, run the same tests on it, and open
 #   a PR into `punkroc` only when they pass. On a conflict or a failing test
@@ -33,6 +34,22 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    # For the Postgres tests of platforms/server/postgres and the shortener on Postgres.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: punk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PUNK_TEST_POSTGRES: postgres://postgres:punk@localhost:5432/postgres
+      PUNK_REQUIRE_POSTGRES: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
       - &setup_zig
@@ -55,11 +72,14 @@ jobs:
           (cd platforms/roc-abi && cargo test --locked)
           (cd platforms/cli/host && cargo test --locked)
           (cd platforms/server/host && cargo test --locked)
+          (cd platforms/server/postgres && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
-          # The server app: ambit's spec against the punk shortener.
+          # The server apps: ambit's spec against the punk shortener, on a
+          # key-value store and on Postgres.
           (cd examples/punk/shortener/server && cargo test --locked)
+          (cd examples/punk/shortener-postgres/server && cargo test --locked)
 
   upstream:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -69,8 +89,23 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+    # For the Postgres tests of platforms/server/postgres and the shortener on Postgres.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: punk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     env:
       GH_TOKEN: ${{ github.token }}
+      PUNK_TEST_POSTGRES: postgres://postgres:punk@localhost:5432/postgres
+      PUNK_REQUIRE_POSTGRES: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
@@ -110,11 +145,14 @@ jobs:
           (cd platforms/roc-abi && cargo test --locked)
           (cd platforms/cli/host && cargo test --locked)
           (cd platforms/server/host && cargo test --locked)
+          (cd platforms/server/postgres && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
-          # The server app: ambit's spec against the punk shortener.
+          # The server apps: ambit's spec against the punk shortener, on a
+          # key-value store and on Postgres.
           (cd examples/punk/shortener/server && cargo test --locked)
+          (cd examples/punk/shortener-postgres/server && cargo test --locked)
       - name: Push the branch and open a PR
         if: steps.merge.outputs.nothing != 'yes'
         run: |
