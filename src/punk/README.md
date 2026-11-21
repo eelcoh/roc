@@ -287,6 +287,37 @@ of `List.indexedMap`); Roc's own keep `U64` (`List.len`). `toInt` turns a
 Roc's functions that may fail keep returning a `Result` (`List.first`,
 `Dict.get`); the Elm-only ones return a `Maybe` (`List.head`, `String.toInt`).
 
+## Design rules (the punk check layer)
+
+On top of Roc, the translator enforces a few rules of its own. Each has a
+stable code that starts the error message and is in `Diagnostic.code`, so a
+tool or an agent can recognise it without reading the text
+(`src/punk/rules.zig`):
+
+| Code | Rule |
+|------|------|
+| `P101` | `crash` is only allowed inside an `expect` test. A program returns a `Result` or `Maybe` instead of stopping halfway. |
+| `P102` | `dbg` is only allowed inside an `expect` test, so no debug output stays behind. |
+| `P201` | Everything a module exposes has a type annotation (with `exposing (..)`: every top-level value). Apps are exempt: the platform fixes the type of `main!`. |
+
+```
+Day01.punk:12:9: P101: 'crash' is only allowed inside an 'expect' test. A program must not stop halfway: ...
+```
+
+## Numbers
+
+Provisional choice (roadmap decision 4): numbers follow Elm where Roc would
+crash. Dividing an integer by zero gives 0: `7 // 0`, `7 % 0`, `modBy 0 7`
+and `remainderBy 0 7` are all `0`. `modBy` and `remainderBy` are Elm's (the
+result of `modBy` has the sign of the divisor, of `remainderBy` that of the
+number). `a // b` is written as `punk_int_div(a, b)` in the translation.
+
+All of this is in `src/punk/numbers.zig`; its `policy` switches back to
+Roc's behaviour, the starting point if this becomes a `Result` later.
+Wrapping on overflow of `+`, `-` and `*` is not done yet: the translator
+does not know the types of values, and only Roc's integer types can wrap,
+so `a + b` still crashes on overflow, as in Roc.
+
 ## A platform of its own
 
 `test/punk/platform` is a small platform for punkroc programs: `Stdout`,

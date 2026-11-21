@@ -14,6 +14,8 @@
 //! `toInt` and `fromInt` turn a `U64` into an `Int` and back.
 
 const std = @import("std");
+/// Number functions (`modBy`) and operators (`//`): see numbers.zig.
+const numbers = @import("numbers.zig");
 
 /// A helper definition. `def` is Roc source for a definition named `name`;
 /// `uses` are other helpers it calls.
@@ -30,13 +32,13 @@ pub const Helper = struct {
 /// The helper for the punkroc name `snake_name` (in Roc's spelling:
 /// `List.indexed_map`, `to_int`), if there is one.
 pub fn helper(snake_name: []const u8) ?Helper {
-    return helpers.get(snake_name);
+    return helpers.get(snake_name) orelse numbers.helper(snake_name);
 }
 
 /// The helper called `name` (`punk_list_head`).
 pub fn helperByName(name: []const u8) ?Helper {
     for (helpers.values()) |h| if (std.mem.eql(u8, h.name, name)) return h;
-    return null;
+    return numbers.helperByName(name);
 }
 
 /// The Roc name of an Elm function that Roc has under another name
