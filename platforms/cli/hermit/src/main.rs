@@ -1,8 +1,8 @@
 //! Spike: the host of punkroc's `cli` platform as a Hermit unikernel.
 //!
 //! The same C ABI as `platforms/cli/host`: the app calls `roc_alloc`, `roc_stdout_line`, ...
-//! and this program's `main` calls the app's `roc_main`. Memory and Roc's values come from the
-//! cli host's own `roc.rs`. The effects are plain std here, not ambit: ambit's cli platform runs
+//! and this program's `main` calls the app's `roc_main`. Memory and Roc's values come from
+//! `platforms/roc-abi`, as for the other hosts. The effects are plain std here, not ambit: ambit's cli platform runs
 //! on cap-std (rustix), which doesn't build for Hermit. A real unikernel platform would sit on
 //! ambit's hermit backend (`ambit-server-hermit`) instead.
 //!
@@ -12,14 +12,11 @@
 #[cfg(target_os = "hermit")]
 use hermit as _;
 
-#[path = "../../host/src/roc.rs"]
-#[allow(dead_code)]
-mod roc;
-
 use std::io::Write;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use punk_roc_abi as roc;
 use roc::{RocList, RocStr, RocTry};
 
 unsafe extern "C" {
@@ -99,7 +96,7 @@ pub unsafe extern "C" fn roc_crashed(bytes: *const u8, len: usize) {
 // --- Hosted functions: the effects of platforms/cli/*.roc ---------------------------------------
 
 #[unsafe(no_mangle)]
-pub extern "C" fn roc_arg_list() -> RocList {
+pub extern "C" fn roc_arg_list() -> RocList<RocStr> {
     RocList::of_strs(&[])
 }
 

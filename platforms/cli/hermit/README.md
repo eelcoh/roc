@@ -25,7 +25,7 @@ Twee toevalsgetallen verschillen: ja
    the app and its static data, and needs nothing from a C library: only
    `roc_alloc`, `roc_dealloc`, `roc_crashed` and the hosted functions.
 2. `cargo build --target x86_64-unknown-hermit` builds this crate: the same C
-   ABI as the cli host, with the cli host's own `roc.rs` for memory and Roc's
+   ABI as the cli host, with `platforms/roc-abi` for memory and Roc's
    values, Rust std, and the Hermit kernel (the `hermit` crate builds it from
    source). `build.rs` links `libapp.a` in (`PUNK_APP_OBJECTS`).
 3. QEMU boots the image with Hermit's loader.
