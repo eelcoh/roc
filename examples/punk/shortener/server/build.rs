@@ -33,6 +33,8 @@ fn main() {
         "aarch64-unknown-linux-musl" => "arm64musl",
         "x86_64-apple-darwin" => "x64mac",
         "aarch64-apple-darwin" => "arm64mac",
+        // Freestanding ELF at the baseline CPU level: Hermit's QEMU CPU model has no AVX.
+        "x86_64-unknown-hermit" => "x64v1elf",
         other => panic!("punkroc's server platform has no target for {other} yet"),
     };
     let archive = out.join("libapp.a");

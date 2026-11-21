@@ -19,11 +19,20 @@ path = "src/main.rs"
 # ambit, pinned to the same commit as platforms/server/host.
 [dependencies]
 ambit-caps = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-server = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+punk-server = { path = "../../../../platforms/server/host" }
+
+# The wiring on Linux and macOS (src/main.rs): ambit's native backend, locked down.
+[target.'cfg(not(target_os = "hermit"))'.dependencies]
 ambit-caps-kv-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
 ambit-lockdown = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
-ambit-server = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
 ambit-server-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
-punk-server = { path = "../../../../platforms/server/host" }
+
+# The wiring as a Hermit unikernel (src/hermit.rs): ambit's hermit backend, and the kernel with
+# the deployment profile of ambit's run-hermit (QEMU: virtio-net over PCI, ACPI, DHCP).
+[target.'cfg(target_os = "hermit")'.dependencies]
+ambit-server-hermit = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+hermit = { git = "https://github.com/hermit-os/hermit-rs.git", tag = "hermit-0.13.2", default-features = false, features = ["acpi", "pci", "tcp", "dhcpv4", "virtio-net"] }
 
 [dev-dependencies]
 ambit-server-sim = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
