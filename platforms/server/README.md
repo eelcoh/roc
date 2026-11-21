@@ -26,13 +26,83 @@ handle! = fn req ->
 | `Random` | `u64! : () => U64` |
 | `Config` | `text! : () => Str`, the configuration the wiring gives the app (JSON, read with `json.Decode`) |
 | `Log` | `info!`, `warn!`, `error! : Str => {}` |
+| `Postgres` | `rows! : Row.Decoder a -> Sql.Query => Result (List a) _`, `row!` (at most one row: `Maybe a`), `execute! : Sql.Query => Result U64 _` (rows changed) |
+| `Sql` | `query : Str -> List Sql.Param -> Sql.Query` (the SQL is a literal, rule P301), parameters `text`, `int`, `float`, `bool`, `null`, `nullable` |
+| `Row` | decoders as Elm's `Json.Decode`: `field "url" Row.text`, columns `int`, `float`, `text`, `bool`, `nullable`; `map` to `map5`, `succeed`, `fail`, `andThen` |
 
-The example app is ambit's link shortener: `examples/punk/shortener/`.
+The example app is ambit's link shortener: `examples/punk/shortener/`, and
+the same app with its links in Postgres: `examples/punk/shortener-postgres/`.
+
+## Postgres
+
+```
+import pf.Postgres
+import pf.Sql
+import pf.Row
+
+type alias Link = { created : Int, url : Str }
+
+linkRow : Row.Decoder Link
+linkRow =
+    Row.map2 (fn created, url -> { created, url })
+        (Row.field "created" Row.int)
+        (Row.field "url" Row.text)
+
+findLink : Str -> Sql.Query
+findLink = fn id ->
+    Sql.query "SELECT created, url FROM links WHERE id = $1" [Sql.text id]
+
+resolve! : Str => Result (Maybe Link) _
+resolve! = fn id ->
+    Postgres.row! linkRow (findLink id)
+```
+
+- **No SQL from text.** A `Sql.Query` is SQL written in the program plus the
+  values for its parameters. `Sql.Query` is opaque, so only `Sql.query` makes
+  one, and punk only accepts a string literal without `${...}` as its SQL
+  (rule P301): `Sql.query ("SELECT * FROM " ++ table) []` doesn't compile. A
+  value from a request can only ever be a parameter.
+- **Typed both ways.** The host prepares the SQL and checks each parameter
+  against the type the statement wants (`Sql.int` for an `integer`, an `Int`
+  that doesn't fit an `int4` is an error, not a wrapped number). A column is
+  read as bool, int (`int2/4/8`), float (`float4/8`) or text (`text`,
+  `varchar`, `char`, `name`); for any other type the error says how to
+  convert it in the SQL (`created::text`). The decoder then checks each
+  column's kind, so a row that doesn't fit is `RowErr "column \"created\":
+  expected an int, got text"`, not a wrong value.
+- **Errors are values.** `PgErr { code, message }` has Postgres's SQLSTATE
+  (`23505` is a unique violation, `08000` is no connection); the shortener
+  answers 503 for it and 500 for a `RowErr`.
+- **A capability.** The wiring opens the database and hands it to the app
+  (`App::with_database`); the app never sees the connection string, and an
+  app without one gets `PgErr { code = "08000", .. }` for every query.
+- **What B1 builds on.** The Acadia-style query language (roadmap B1) will
+  compile a pipeline (`Db.access links |> Db.filter ... |> Db.selectAll`) to
+  exactly these two values, a `Sql.Query` and a `Row.Decoder`, made by the
+  compiler from the table's type, and run them with `Postgres.rows!`. Written
+  SQL with `Sql.query` stays as the escape hatch.
+
+The database itself is the crate `postgres/` (`punk-server-postgres`), for
+the wiring on Linux and macOS:
+
+```rust
+let database = punk_server_postgres::Postgres::new(&std::env::var("DATABASE_URL")?, 8)?;
+database.batch(include_str!("../../schema.sql"))?;   // the app's tables
+Lockdown::new().allow(&database) ...                   // its port (and the resolver for a name)
+let app = punk_server::App::new(clock, random, kv, config).with_database(database);
+```
+
+It is a pool of at most `max` connections: a query takes a free one, or
+opens one, or waits up to 5 seconds (then `PgErr { code = "53300" }`). A
+broken connection is dropped and the next query opens a new one, so the app
+recovers by itself when the database comes back. Each connection prepares a
+statement once and keeps it. `options=-c statement_timeout=5s` in the
+connection string limits how long a query may take.
 
 ## What the app can do
 
 Only what the platform hands it, as in ambit: a clock, randomness, one
-key-value store, its configuration and a log. There is no file, network,
+key-value store, one database, its configuration and a log. There is no file, network,
 process or environment access in the API, so a punk server app can't reach
 anything else, whatever its code does. Which store, which clock and which
 configuration is up to the wiring, a few lines of Rust per app (like ambit's
@@ -121,6 +191,16 @@ allocated for it, and logs a warning when not (`tests/platform.rs` of the
 shortener checks it too).
 
 ## Not there yet
+
+- Transactions: each query commits on its own. A `Transaction a` value (as
+  in Acadia) comes with the query language, B1.
+- Row-level security: decided to be mandatory per table, comes with B1/B2.
+  Until then the database's own roles and policies are the wiring's job.
+- TLS to the database (`NoTls` now: for a database on the same machine or a
+  private network), and Postgres on hermit (the `postgres` crate needs
+  tokio, which doesn't run there yet).
+- Times, UUIDs, JSON and `numeric` as their own types: convert them in the
+  SQL for now.
 
 - `Kv.scan` (ambit has it): no app needed it yet.
 - A typed configuration instead of `Config.text!`: the platform would need a

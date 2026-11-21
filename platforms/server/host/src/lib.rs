@@ -13,11 +13,14 @@
 use std::cell::Cell;
 use std::time::UNIX_EPOCH;
 
+mod database;
+pub use database::{Database, DbError, Rows, Value};
+
 use ambit_caps::{Clock, Kv, Random};
-pub use ambit_server::{Handler, Request, Response};
 use ambit_server::http::{HeaderName, HeaderValue, StatusCode, header};
-pub use punk_roc_abi::{live_bytes, thread_live_bytes};
+pub use ambit_server::{Handler, Request, Response};
 use punk_roc_abi::{RocList, RocPair, RocStr, RocTry};
+pub use punk_roc_abi::{live_bytes, thread_live_bytes};
 
 /// The app's result: `Http.Response` of `platforms/server/Http.roc`. Fields of the same alignment
 /// are in alphabetical order, the `U16` comes last.
@@ -33,6 +36,30 @@ struct RocResponse {
 pub struct RocFound {
     text: RocStr,
     code: u8,
+}
+
+/// `Sql.Param` and `Row.Cell`: `{ kind : U8, text : Str }`, the `Str` first.
+#[repr(C)]
+pub struct RocCell {
+    text: RocStr,
+    kind: u8,
+}
+
+// SAFETY: it holds a `Str`.
+unsafe impl punk_roc_abi::Element for RocCell {
+    const REFCOUNTED: bool = true;
+}
+
+/// What `Postgres.run_host!` gives: the fields of the same alignment in alphabetical order, the
+/// `Bool` last.
+#[repr(C)]
+pub struct RocRun {
+    affected: u64,
+    columns: RocList<RocStr>,
+    error_code: RocStr,
+    error_message: RocStr,
+    rows: RocList<RocList<RocCell>>,
+    ok: bool,
 }
 
 unsafe extern "C" {
@@ -51,6 +78,7 @@ pub struct App {
     clock: Box<dyn Clock>,
     random: Box<dyn Random>,
     kv: Box<dyn Kv>,
+    database: Box<dyn Database>,
     config: String,
 }
 
@@ -67,8 +95,16 @@ impl App {
             clock: Box::new(clock),
             random: Box::new(random),
             kv: Box::new(kv),
+            database: Box::new(database::NoDatabase),
             config: config.into(),
         }
+    }
+
+    /// The app, with the database its `Postgres` queries run on. Without one, every query
+    /// fails with `PgErr { code = "08000", .. }`.
+    pub fn with_database(mut self, database: impl Database) -> Self {
+        self.database = Box::new(database);
+        self
     }
 }
 
@@ -97,7 +133,10 @@ impl Handler for App {
         });
         let leaked = thread_live_bytes() - before;
         if leaked != 0 {
-            tracing::warn!(bytes = leaked, "the app did not free all it allocated for a request");
+            tracing::warn!(
+                bytes = leaked,
+                "the app did not free all it allocated for a request"
+            );
         }
         response
     }
@@ -107,7 +146,10 @@ impl Handler for App {
 /// the app can't smuggle a line break into a header.
 fn to_http(response: &RocResponse) -> Response {
     let Ok(status) = StatusCode::from_u16(response.status) else {
-        tracing::error!(status = response.status, "the app answered with an invalid status");
+        tracing::error!(
+            status = response.status,
+            "the app answered with an invalid status"
+        );
         return internal_error();
     };
     let mut http = Response::new(response.body.as_slice().to_vec());
@@ -120,7 +162,10 @@ fn to_http(response: &RocResponse) -> Response {
                 http.headers_mut().append(name, value);
             }
             _ => {
-                tracing::error!(name = pair.first.as_str(), "the app answered with an invalid header");
+                tracing::error!(
+                    name = pair.first.as_str(),
+                    "the app answered with an invalid header"
+                );
                 return internal_error();
             }
         }
@@ -307,4 +352,65 @@ pub extern "C" fn roc_log_warn(message: RocStr) {
 #[unsafe(no_mangle)]
 pub extern "C" fn roc_log_error(message: RocStr) {
     tracing::error!("{}", message.as_str());
+}
+
+/// `Postgres.run_host!`: runs one query on the app's database. The parameters come first, as in
+/// `Postgres.roc`.
+#[unsafe(no_mangle)]
+pub extern "C" fn roc_pg_run(params: RocList<RocCell>, sql: RocStr) -> RocRun {
+    let mut values = Vec::with_capacity(params.as_slice().len());
+    for (i, param) in params.as_slice().iter().enumerate() {
+        match database::from_cell(param.kind, param.text.as_str()) {
+            Some(value) => values.push(value),
+            None => {
+                return run_failed(&DbError::new(
+                    "22000",
+                    format!("parameter ${} is broken", i + 1),
+                ));
+            }
+        }
+    }
+    let result = app(|app| app.database.run(sql.as_str(), &values));
+    match result {
+        Ok(rows) => RocRun {
+            affected: rows.affected,
+            columns: RocList::of_strs(&rows.columns),
+            error_code: RocStr::empty(),
+            error_message: RocStr::empty(),
+            rows: RocList::from_vec(
+                rows.rows
+                    .iter()
+                    .map(|row| {
+                        RocList::from_vec(
+                            row.iter()
+                                .map(|value| {
+                                    let (kind, text) = database::to_cell(value);
+                                    RocCell {
+                                        text: RocStr::new(&text),
+                                        kind,
+                                    }
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            ok: true,
+        },
+        Err(e) => {
+            tracing::warn!(code = e.code.as_str(), "query failed: {}", e.message);
+            run_failed(&e)
+        }
+    }
+}
+
+fn run_failed(e: &DbError) -> RocRun {
+    RocRun {
+        affected: 0,
+        columns: RocList::empty(),
+        error_code: RocStr::new(&e.code),
+        error_message: RocStr::new(&e.message),
+        rows: RocList::empty(),
+        ok: false,
+    }
 }

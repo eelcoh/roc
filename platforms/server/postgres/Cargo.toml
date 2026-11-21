@@ -1,0 +1,18 @@
+[package]
+name = "punk-server-postgres"
+description = "A Postgres database for punkroc's server platform: a pool of connections as a punk-server Database."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A library for the wiring of an app (its main.rs and tests), on Linux and macOS: the app itself
+# only sees the `Database` capability of punk-server. See platforms/server/README.md.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ambit-lockdown = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+bytes = "1"
+postgres = { version = "0.19", default-features = false }
+punk-server = { path = "../host" }
+tracing = "0.1"

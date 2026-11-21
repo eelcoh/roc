@@ -1823,6 +1823,10 @@ const Emitter = struct {
     /// Type names an import exposes unqualified that are such an alias of
     /// another module, with their Roc spelling (`Grid` is `Grid.GridAlias`).
     exposed_aliases: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// The names that mean the platform's `Sql.query` here (`Sql.query`,
+    /// `Db.query` after `import pf.Sql as Db`, `query` when it is exposed):
+    /// its SQL has to be written in the program (rule P301).
+    sql_query_names: std.ArrayList([]const u8) = .empty,
 
     /// `order` is not `.none` for names imported unqualified from a Roc
     /// module (`import Json exposing [decode]`).
@@ -1880,6 +1884,7 @@ const Emitter = struct {
             .type_nominal => |t| try e.local_types.put(e.a, t.name, {}),
             else => {},
         };
+        try e.findSqlQuery(items);
         try e.loadImports(items);
         try e.bindItems(items);
         if (moduleHeaderName(items) != null) {
@@ -2508,6 +2513,40 @@ const Emitter = struct {
         return iface;
     }
 
+    /// Finds the names of the platform's `Sql.query` in the imports: a
+    /// module `Sql` from a package (`import pf.Sql`, `import pf.Sql as Db`).
+    fn findSqlQuery(e: *Emitter, items: []const Item) Error!void {
+        for (items) |item| {
+            if (item.kind != .raw) continue;
+            const imp = parseImport(item.kind.raw) orelse continue;
+            if (imp.package == null or !std.mem.eql(u8, imp.module, "Sql")) continue;
+            try e.sql_query_names.append(e.a, try std.fmt.allocPrint(e.a, "{s}.query", .{imp.alias}));
+            const list = imp.exposing orelse continue;
+            var names = std.mem.tokenizeAny(u8, list, ", \t\r\n");
+            while (names.next()) |n| if (std.mem.eql(u8, n, "query")) try e.sql_query_names.append(e.a, "query");
+        }
+    }
+
+    fn isSqlQuery(e: *Emitter, name: []const u8) bool {
+        for (e.sql_query_names.items) |n| if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+
+    /// Rule P301: the SQL of a query is text in the program, never text made
+    /// while it runs, so no value can change what a query does: values go in
+    /// as parameters (`$1`). `name` is how the file calls `Sql.query`.
+    fn checkSqlLiteral(e: *Emitter, name: []const u8, args: []*Expr) Error!void {
+        if (args.len > 0) {
+            var sql = args[0];
+            while (sql.* == .paren) sql = sql.paren;
+            if (sql.* == .string) {
+                if (std.mem.find(u8, sql.string, "${") == null) return;
+                return e.errAtRule(sql.string, .sql_not_literal, try std.fmt.allocPrint(e.a, "the SQL of '{s}' can't contain '${{...}}': a value in the SQL text could change what the query does. Write '$1', '$2', ... in the SQL and pass the values in the list: {s} \"... WHERE id = $1\" [Sql.text id]", .{ name, name }));
+            }
+        }
+        return e.errAtRule(name, .sql_not_literal, try std.fmt.allocPrint(e.a, "'{s}' takes its SQL as text written right here, as in {s} \"SELECT url FROM links WHERE id = $1\" [Sql.text id]: SQL made while the program runs could be changed by a request. Pass the values that change as parameters.", .{ name, name }));
+    }
+
     /// Rule P201: every function and value a module exposes has a type
     /// annotation, so its interface is written down and does not change by
     /// accident when its body does.
@@ -2717,6 +2756,7 @@ const Emitter = struct {
         const func = call.func;
         const args = call.args;
         const f_ident = if (func.* == .paren and func.paren.* == .ident) func.paren else func;
+        if (f_ident.* == .ident and e.isSqlQuery(f_ident.ident)) try e.checkSqlLiteral(f_ident.ident, args);
         if (f_ident.* == .ident) if (try e.helperFor(f_ident.ident)) |h| if (h.tmpl) |tmpl| if (args.len == h.arity) {
             try e.markAt(f_ident.ident, 0);
             return e.emitTemplate(tmpl, args);
@@ -2925,6 +2965,8 @@ const Emitter = struct {
     fn emitExpr(e: *Emitter, x: *Expr) Error!void {
         switch (x.*) {
             .ident => |name| {
+                // `Sql.query` as a value would let SQL in that isn't in the program.
+                if (e.isSqlQuery(name)) try e.checkSqlLiteral(name, &.{});
                 // A builtin whose arguments punkroc reorders, used as a value
                 // (`List.map` on its own): a lambda that reorders them.
                 if (try e.calleeArity(x)) |callee| {

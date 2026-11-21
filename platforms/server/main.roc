@@ -2,7 +2,7 @@ platform ""
     requires {
         handle! : Http.Request => Http.Response
     }
-    exposes [Http, Clock, Random, Kv, Config, Log]
+    exposes [Http, Clock, Random, Kv, Config, Log, Postgres, Sql, Row]
     packages {}
     provides { "roc_handle": handle_for_host! }
     hosted {
@@ -14,6 +14,7 @@ platform ""
         "roc_log_error": Log.error!,
         "roc_log_info": Log.info!,
         "roc_log_warn": Log.warn!,
+        "roc_pg_run": Postgres.run_host!,
         "roc_random_u64": Random.u64!,
     }
     targets: {
@@ -32,7 +33,10 @@ import Clock
 import Config
 import Kv
 import Log
+import Postgres
 import Random
+import Row
+import Sql
 
 ## Called by the host for each request, with the request in pieces that are
 ## easy to hand over through the C ABI.

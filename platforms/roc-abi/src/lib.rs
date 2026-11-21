@@ -285,6 +285,11 @@ unsafe impl Element for RocPair {
     const REFCOUNTED: bool = true;
 }
 
+// SAFETY: a list holds a reference to its elements.
+unsafe impl<T: Element> Element for RocList<T> {
+    const REFCOUNTED: bool = true;
+}
+
 /// Roc's `List(T)`. Owns one reference: dropping it gives that reference back, and with the
 /// last one the elements and the list itself are freed.
 #[repr(C)]

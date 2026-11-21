@@ -14,6 +14,17 @@ fn check(src: []const u8, expected: []const u8) (punk.Error || error{TestExpecte
     try std.testing.expectEqualStrings(expected, out);
 }
 
+/// Translates without an error, whatever the output.
+fn translateOk(src: []const u8) punk.Error!void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    _ = punk.translate(arena.allocator(), src, &diag) catch |err| {
+        std.debug.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.col, diag.message });
+        return err;
+    };
+}
+
 fn checkError(src: []const u8, line: u32, msg_part: []const u8) error{ TestExpectedEqual, TestUnexpectedResult }!void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1084,6 +1095,23 @@ test "rules: crash and dbg only inside tests" {
         \\}
         \\
     );
+}
+
+test "rules: the SQL of Sql.query is text in the program" {
+    const head = "app [main!] { pf: platform \"p.roc\" }\n\nimport pf.Sql\n\n";
+    // Text in the program, also through a pipe, `as`, or `exposing`: fine.
+    try translateOk(head ++ "q = fn id -> Sql.query \"SELECT url FROM links WHERE id = $1\" [ Sql.text id ]\n");
+    try translateOk(head ++ "q = fn id -> [ Sql.text id ] |> Sql.query \"SELECT 1\"\n");
+    try translateOk("app [main!] { pf: platform \"p.roc\" }\n\nimport pf.Sql as Db\n\nq = Db.query (\"SELECT 1\") []\n");
+    // Text made while the program runs: P301.
+    try checkRule(head ++ "q = fn t -> Sql.query \"SELECT * FROM ${t}\" []\n", 5, 23, .sql_not_literal);
+    try checkRule(head ++ "q = fn sql -> Sql.query sql []\n", 5, 15, .sql_not_literal);
+    try checkRule(head ++ "q = fn t -> Sql.query (\"SELECT \" ++ t) []\n", 5, 13, .sql_not_literal);
+    try checkRule(head ++ "qs = List.map (fn s -> s) [] |> List.map Sql.query\n", 5, 42, .sql_not_literal);
+    try checkRule("app [main!] { pf: platform \"p.roc\" }\n\nimport pf.Sql as Db\n\nq = fn s -> Db.query s []\n", 5, 13, .sql_not_literal);
+    try checkRule("app [main!] { pf: platform \"p.roc\" }\n\nimport pf.Sql exposing [query]\n\nq = fn s -> query s []\n", 5, 13, .sql_not_literal);
+    // A module of the app's own called Sql is not the platform's.
+    try translateOk("app [main!] { pf: platform \"p.roc\" }\n\nimport Sql\n\nq = fn s -> Sql.query s []\n");
 }
 
 test "rules: what a module exposes has a type annotation" {
