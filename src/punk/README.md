@@ -49,14 +49,35 @@ When the module declares `type Shape` with the module's own name, that type
 carries the block (`Shape := [Circle(F64), ...].{ area = ... }`). See
 `examples/punk/imports/` and "Roc compatibility" below.
 
+Error messages are about the `.punk` file, not its Roc translation. The
+translator keeps a source map (where each name, literal and operator of the
+translation came from), and every report about a `.punk` file is rewritten
+with it before it is shown (`src/compile/punk_report.zig`): positions and
+source lines come from the `.punk` file, and names are spelled as in punkroc.
+
+```
+── ✗ name not in scope ─────────────────── examples/punk/app.punk:20:9
+
+Nothing is named notDefined in this scope.
+
+x + notDefined
+    ^^^^^^^^^^
+```
+
+A part of the translation that punkroc reordered (`xs |> List.map f` is
+`List.map(xs, f)`) is shown as the whole pipeline it came from.
+
 A syntax error in a `.punk` file is reported like the compiler's own errors:
 
 ```
-── ✗ syntax error ──────────────────────────────────────────────────────────────
+── ✗ syntax error ──────────────────────── examples/punk/app.punk:7:22
 
-There is a syntax error in examples/punk/app.punk, line 3, column 1.
+There is a syntax error in examples/punk/app.punk.
 
-expected an expression but found 'end of file'
+Stdout.line! "hi"
+                 ^
+
+expected ')' but found 'end of file'
 ```
 
 ## Without the compiler
