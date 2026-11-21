@@ -1,0 +1,30 @@
+[package]
+name = "punk-cli-host"
+description = "Host of punkroc's cli platform: ambit's cli platform, wired to a compiled punk app through Roc's C ABI."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+# roc links `libhost.a` with the app's object into one program.
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+# ambit is used as a library, pinned to one commit (Cargo.lock holds it too).
+# Neither repository depends on the other's build: this crate is the only place
+# they meet. To try a local ambit, see platforms/cli/README.md.
+[dependencies]
+ambit-caps = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-caps-dir = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-caps-dir-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-cli = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-cli-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+
+[profile.release]
+# A crash in the host ends the program; nothing unwinds into the app.
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.dev]
+panic = "abort"

@@ -25,7 +25,7 @@ is often caused by an earlier one.
 ## A program
 
 ```
-app [main!] { pf: platform "../../test/punk/platform/main.roc" }
+app [main!] { pf: platform "../../platforms/cli/main.roc" }
 
 import pf.Stdout
 
@@ -34,7 +34,7 @@ main! = fn () ->
 ```
 
 The path after `platform` is relative to the `.punk` file; it points to
-`test/punk/platform/main.roc` in the punkroc repository. A file is an `app`
+`platforms/cli/main.roc` in the punkroc repository. A file is an `app`
 (it has `main!`) or a `module` (see "Modules").
 
 ## Syntax
@@ -331,7 +331,8 @@ them as the punk spelling (`String.fromInt`, `List.length`).
 
 ## The platform
 
-`test/punk/platform` provides:
+`platforms/cli` (`app [main!] { pf: platform "platforms/cli/main.roc" }`,
+relative to your file) provides:
 
 ```
 Stdout.line! : Str => {}             -- prints a line
@@ -342,7 +343,14 @@ Stdin.readAll! : () => Str
 File.read! : Str => Result Str [FileErr Str]
 File.write! : Str -> Str => Result {} [FileErr Str]   -- path, text
 Arg.list! : () => List Str           -- the arguments after the program name
+Clock.now! : () => I64               -- milliseconds since 1970 (Elm's posixToMillis)
+Clock.elapsed! : () => I64           -- milliseconds since the program started
+Random.u64! : () => U64              -- 64 random bits from the OS
 ```
+
+`File.read!` and `File.write!` only work on files named on the command line
+(`punk app.punk input.txt`); any other path gives `Err (FileErr msg)`. Take
+the path from `Arg.list!`, never write a file name into the program.
 
 Import what you use: `import pf.Stdout`, `import pf.File`, ...
 
@@ -362,7 +370,7 @@ The shape of an Advent of Code solution: the example input in the file, the
 real input from a file argument. (The cookbook files live in
 `examples/punk/aoc2024/`, hence their longer platform path; some use the
 `test/fx/platform` test platform, which has `Stdout` too. Use
-`test/punk/platform` for your own programs.)
+`platforms/cli` for your own programs.)
 
 @@example aoc2024/Day01.punk@@
 
