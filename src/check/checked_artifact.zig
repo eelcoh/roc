@@ -4801,6 +4801,16 @@ const CheckedTypePublication = struct {
         return self.source_types.?.get(module, resolved);
     }
 
+    /// A dispatch owner is the published declaration, not just a statement that
+    /// introduced a name. Qualified value references have their own publication.
+    pub fn nominalMethodOwner(self: *const CheckedTypePublication, env: *const ModuleEnv, stmt: CIR.Statement.Idx) ?canonical.NominalTypeKey {
+        const declarations = &self.source_types.?.scratch.?.local_nominal_declarations;
+        if (declarations.ids.get(stmt)) |id| return self.store.nominalDeclarationById(id).nominal;
+        const statement = env.store.getStatement(stmt);
+        if (statement == .s_nominal_decl and !publishesLocalNominal(env, stmt, statement.s_nominal_decl.anno)) return null;
+        checkedArtifactInvariant("method owner statement {d} has no published nominal declaration", .{@backingInt(stmt)});
+    }
+
     /// A retained method contributes its exact callable type as a publication
     /// root, independently of executable-body reachability. This is an ordinary
     /// producer request, not recovery from a failed published-type lookup.
@@ -6493,8 +6503,7 @@ fn appendCheckedNominalDeclarationFromStatement(
     anno_idx: CIR.TypeAnno.Idx,
     _: bool,
 ) Allocator.Error!void {
-    if (anno_idx == .placeholder) return;
-    if (!localNominalDeclarationIsValid(module.moduleEnvConst(), statement_idx)) return;
+    if (!publishesLocalNominal(module.moduleEnvConst(), statement_idx, anno_idx)) return;
 
     const statement_root = try appendCheckedTypeRoot(
         allocator,
@@ -10447,10 +10456,7 @@ fn testFreshCheckedKeyInfo(allocator: Allocator, names: *const canonical.Canonic
     return try digester.keyInfo(root);
 }
 
-const EmptyTagCheckedOutputTestError = @import("test/TestEnv.zig").TestEnvError || error{
-    ExpectedFlexIdentity,
-    ExpectedFunctionPayload,
-};
+const EmptyTagCheckedOutputTestError = @import("test/TestEnv.zig").TestEnvError;
 
 test "checked row defaults apply only to unconstrained type variables" {
     const no_constraints = types.StaticDispatchConstraint.SafeList.Range.empty();
@@ -10507,55 +10513,6 @@ fn withEmptyTagCheckedOutputForTest(
         .direct = &.{},
         .available = &.{},
     }, &store, mutable_types, explicit_empty);
-}
-
-test "checked output preserves shared defaulted empty-tag identity" {
-    const allocator = std.testing.allocator;
-    try withEmptyTagCheckedOutputForTest(allocator, struct {
-        fn inspect(module: TypedCIR.Module, names: *canonical.CanonicalNameStore, imports: CheckedImportViews, store: *CheckedTypeStore, type_store: *types.Store, _: Var) EmptyTagCheckedOutputTestError!void {
-            const identity = try type_store.fresh();
-            try type_store.setVarToEmptyTagUnionDefault(identity);
-            const alias = try type_store.freshRedirect(identity);
-            try type_store.canonicalizeAndSeal(module.identStoreConst());
-            var active = try CheckedSourceTypeRoots.init(allocator, module);
-            defer active.deinit();
-            const test_keys = try attachTestSealedTypes(allocator, module, names, imports, store);
-            defer test_keys.destroy();
-            const first = try appendCheckedTypeRoot(allocator, module, store, &active, identity);
-            const second = try appendCheckedTypeRoot(allocator, module, store, &active, alias);
-            try std.testing.expectEqual(first, second);
-            const first_payload = store.payload(first);
-            if (first_payload != .flex) return error.ExpectedFlexIdentity;
-            const variable = first_payload.flex;
-            try std.testing.expectEqual(RowDefault.empty_tag_union, variable.row_default.?);
-        }
-    }.inspect);
-}
-
-test "checked output preserves distinct defaulted empty-tag identities" {
-    const allocator = std.testing.allocator;
-    try withEmptyTagCheckedOutputForTest(allocator, struct {
-        fn inspect(module: TypedCIR.Module, names: *canonical.CanonicalNameStore, imports: CheckedImportViews, store: *CheckedTypeStore, type_store: *types.Store, _: Var) EmptyTagCheckedOutputTestError!void {
-            const first_identity = try type_store.fresh();
-            const second_identity = try type_store.fresh();
-            try type_store.setVarToEmptyTagUnionDefault(first_identity);
-            try type_store.setVarToEmptyTagUnionDefault(second_identity);
-            try type_store.canonicalizeAndSeal(module.identStoreConst());
-            var active = try CheckedSourceTypeRoots.init(allocator, module);
-            defer active.deinit();
-            const test_keys = try attachTestSealedTypes(allocator, module, names, imports, store);
-            defer test_keys.destroy();
-            const first = try appendCheckedTypeRoot(allocator, module, store, &active, first_identity);
-            const second = try appendCheckedTypeRoot(allocator, module, store, &active, second_identity);
-            try std.testing.expect(first != second);
-            for ([_]CheckedTypeId{ first, second }) |root| {
-                const payload = store.payload(root);
-                if (payload != .flex) return error.ExpectedFlexIdentity;
-                const variable = payload.flex;
-                try std.testing.expectEqual(RowDefault.empty_tag_union, variable.row_default.?);
-            }
-        }
-    }.inspect);
 }
 
 test "checked output keeps proven closed empty tag union explicit" {
@@ -10616,7 +10573,7 @@ test "independent closed function graphs share one key and add no synthesized ro
     }.inspect);
 }
 
-test "checker marks exhaustiveness-defaulted empty payload provenance" {
+test "an exhaustive match commits a free payload variable to the empty tag union" {
     const TestEnv = @import("test/TestEnv.zig");
     const source =
         \\x : Try(I64, _)
@@ -10642,34 +10599,6 @@ test "checker marks exhaustiveness-defaulted empty payload provenance" {
     try std.testing.expectEqual(@as(usize, 2), args.len);
     const err_desc = test_env.module_env.types.resolveVar(args[1]).desc;
     try std.testing.expectEqual(types.Content{ .structure = .empty_tag_union }, err_desc.content);
-    try std.testing.expect(err_desc.flags.empty_tag_union_is_default);
-}
-
-test "checked output retains defaulted identity inside parent function digest" {
-    const allocator = std.testing.allocator;
-    try withEmptyTagCheckedOutputForTest(allocator, struct {
-        fn inspect(module: TypedCIR.Module, names: *canonical.CanonicalNameStore, imports: CheckedImportViews, store: *CheckedTypeStore, type_store: *types.Store, _: Var) EmptyTagCheckedOutputTestError!void {
-            const identity = try type_store.fresh();
-            try type_store.setVarToEmptyTagUnionDefault(identity);
-            const function_content = try type_store.mkFuncPure(&.{identity}, identity);
-            const function_var = try type_store.freshFromContent(function_content);
-            try type_store.canonicalizeAndSeal(module.identStoreConst());
-            var active = try CheckedSourceTypeRoots.init(allocator, module);
-            defer active.deinit();
-            const test_keys = try attachTestSealedTypes(allocator, module, names, imports, store);
-            defer test_keys.destroy();
-            const root = try appendCheckedTypeRoot(allocator, module, store, &active, function_var);
-            const root_payload = store.payload(root);
-            if (root_payload != .function) return error.ExpectedFunctionPayload;
-            const function = root_payload.function;
-            try std.testing.expectEqual(@as(usize, 1), function.args.len);
-            try std.testing.expectEqual(function.args[0], function.ret);
-            const return_payload = store.payload(function.ret);
-            if (return_payload != .flex) return error.ExpectedFlexIdentity;
-            const variable = return_payload.flex;
-            try std.testing.expectEqual(RowDefault.empty_tag_union, variable.row_default.?);
-        }
-    }.inspect);
 }
 
 /// Empty per-artifact tables for building `ImportedModuleView`s in tests.
@@ -10964,8 +10893,7 @@ pub const LocalNominalDeclarationIds = struct {
         for (module_env.store.sliceStatements(module_env.all_statements)) |candidate| {
             const statement = module_env.store.getStatement(candidate);
             if (statement != .s_nominal_decl) continue;
-            if (statement.s_nominal_decl.anno == .placeholder) continue;
-            if (!localNominalDeclarationIsValid(module_env, candidate)) continue;
+            if (!publishesLocalNominal(module_env, candidate, statement.s_nominal_decl.anno)) continue;
             try ids.put(candidate, @fromBackingInt(@intCast(next_id)));
             next_id += 1;
         }
@@ -10981,6 +10909,10 @@ pub const LocalNominalDeclarationIds = struct {
             checkedArtifactInvariant("checked nominal declaration statement had no declaration id", .{});
     }
 };
+
+fn publishesLocalNominal(env: *const ModuleEnv, stmt: CIR.Statement.Idx, anno: CIR.TypeAnno.Idx) bool {
+    return anno != .placeholder and localNominalDeclarationIsValid(env, stmt);
+}
 
 /// Whether checking accepted the local nominal declaration at `statement_idx`.
 pub fn localNominalDeclarationIsValid(
@@ -11258,6 +11190,8 @@ pub const ExprDivergence = body_analyses.ExprDivergence;
 pub const exprDivergence = body_analyses.exprDivergence;
 /// See `body_analyses.assertExprNeverDiverges`.
 pub const assertExprNeverDiverges = body_analyses.assertExprNeverDiverges;
+/// See `body_analyses.exprEvaluationHasNoEffect`.
+pub const exprEvaluationHasNoEffect = body_analyses.exprEvaluationHasNoEffect;
 /// The body facts a checked module owns (`body_analyses.BodyAnalyses`).
 pub const BodyAnalyses = body_analyses.BodyAnalyses;
 /// The CIR-only index of a checked module's bodies.
@@ -21897,7 +21831,7 @@ fn publishLiteralConversionRoots(
     const added = roots.roots.items()[first_root..];
     @memcpy(added, root_list.items);
     for (added, first_root..) |*root, index| root.id = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
-    try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, added);
+    try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, added, &.{});
 
     const first_template = templates.templates.items().len;
     try templates.appendEntryWrappersForRoots(allocator, module, names, owner_artifact, &checked_types.store, wrappers, added);
@@ -23100,7 +23034,7 @@ fn publishLiteralArgumentRoots(
         const added = roots.roots.items()[first_root..];
         @memcpy(added, root_list.items);
         for (added, first_root..) |*root, index| root.id = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
-        try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, added);
+        try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, added, &.{});
 
         // The roots' entry wrappers, each a template of its own with no
         // plan: its body is the conversion its root names.
@@ -25271,6 +25205,66 @@ fn testCheckedModuleKey(byte: u8) CheckedModuleArtifactKey {
     return key;
 }
 
+/// Test scaffolding: the fully defined artifact of a module that declares
+/// nothing, over `module_env`, which the caller owns and which must outlive
+/// the artifact. Tests that drive post-check stages without source code
+/// build their checked-module inputs from this. Release it with
+/// `deinitRetainingModuleEnv`.
+pub fn emptyArtifactForTest(allocator: Allocator, module_env: *ModuleEnv, key_byte: u8) Allocator.Error!CheckedModuleArtifact {
+    if (!builtin.is_test) unreachable; // test scaffolding: only test blocks call this
+
+    var canonical_names = canonical.CanonicalNameStore.init(allocator);
+    const module_name = canonical_names.internModuleName(module_env.module_name) catch |err| {
+        canonical_names.deinit();
+        return err;
+    };
+    var artifact: CheckedModuleArtifact = .{
+        .key = testCheckedModuleKey(key_byte),
+        .source_hash = @splat(0),
+        .canonical_names = canonical_names,
+        .module_identity = .{
+            .module_idx = 0,
+            .module_name = module_name,
+            .display_module_name = module_name,
+            .kind = module_env.module_kind,
+        },
+        .checking_context_identity = .{},
+        .module_env = .{ .checked_source = module_env },
+        .exports = .{},
+        .provides_requires = .{},
+        .method_registry = .{},
+        .static_dispatch_plans = .{},
+        .resolved_value_refs = .{},
+        .checked_procedure_templates = .{},
+        .top_level_procedure_bindings = .initEmpty(),
+        .root_requests = .{},
+        .hosted_procs = .{},
+        .platform_required_declarations = .{},
+        .platform_required_bindings = .{},
+        .interface_capabilities = .{},
+        .compile_time_roots = .{},
+        .top_level_values = .{},
+        .hoisted_constants = .{},
+        .const_templates = .{},
+        .const_store = ConstStore.init(allocator),
+    };
+    errdefer artifact.deinitRetainingModuleEnv(allocator);
+    try artifact.attachSealedTypes(allocator, std.testing.io);
+    return artifact;
+}
+
+test "empty test artifact publishes and releases a module without declarations" {
+    const allocator = std.testing.allocator;
+    var env = try ModuleEnv.init(allocator, "");
+    defer env.deinit();
+    var artifact = try emptyArtifactForTest(allocator, &env, 1);
+    defer artifact.deinitRetainingModuleEnv(allocator);
+    const view = importedView(&artifact);
+    try std.testing.expect(view.key.eql(testCheckedModuleKey(1)));
+    try std.testing.expectEqual(@as(usize, 0), view.checked_bodies.nodeCount());
+    try std.testing.expectEqual(@as(usize, 0), view.direct_import_module_keys.len);
+}
+
 const CallableRootTraversal = checked_reachability.AnyReachable(CheckedTypeId, CallableRootScan);
 
 /// Whether no type reachable from `root` holds a callable. One-off consumers
@@ -25280,7 +25274,8 @@ fn checkedTypeHasNoReachableCallableSlots(
     checked_types: *const CheckedTypeStore,
     root: CheckedTypeId,
 ) Allocator.Error!bool {
-    var scan = CallableRootScan{ .checked_types = checked_types };
+    var scan = CallableRootScan.init(allocator, checked_types);
+    defer scan.reach.deinit();
     var traversal = CallableRootTraversal.init(allocator, &scan);
     defer traversal.deinit();
     return !try traversal.visit(root);
@@ -25288,17 +25283,36 @@ fn checkedTypeHasNoReachableCallableSlots(
 
 const CallableRootScan = struct {
     checked_types: *const CheckedTypeStore,
+    reach: NominalFormalReach,
+
+    fn init(allocator: Allocator, store: *const CheckedTypeStore) CallableRootScan {
+        return .{ .checked_types = store, .reach = .{ .allocator = allocator, .checked_types = store, .stored_slots = true } };
+    }
 
     pub fn visit(self: *CallableRootScan, children: anytype, ty: CheckedTypeId) Allocator.Error!?bool {
-        const checked_types = self.checked_types;
         base.dev_diagnostics.countTestWork(.checked_root_callable_nodes, 1);
+        return expand(self.checked_types, children, ty, self);
+    }
+
+    fn variable(_: *CallableRootScan, _: CheckedTypeId) Allocator.Error!bool {
+        return true;
+    }
+
+    fn nominalSlots(self: *CallableRootScan, children: anytype, nominal: CheckedNominalType) Allocator.Error!bool {
+        const index = (try self.reach.declarationIndex(nominal)) orelse return false;
+        if (self.reach.entries.items[index].state != .done) try self.reach.computeGroup(index);
+        return self.reach.applySlots(children, nominal, index);
+    }
+
+    /// The representation edges shared by instance queries and declaration
+    /// summaries. A declaration formal contributes its corresponding argument,
+    /// not an unknown callable; an unbound variable at a use is still unknown.
+    fn expand(checked_types: *const CheckedTypeStore, children: anytype, ty: CheckedTypeId, sink: anytype) Allocator.Error!?bool {
         switch (checked_types.payload(ty)) {
             .pending => checkedArtifactInvariant("callable-slot proof reached pending checked type", .{}),
             .field_kind, .err => {},
-            .flex,
-            .rigid,
-            .function,
-            => return true,
+            .flex, .rigid => return try sink.variable(ty),
+            .function => return true,
             .empty_record,
             .empty_tag_union,
             => {},
@@ -25329,7 +25343,6 @@ const CallableRootScan = struct {
                         .u64x2,
                         .i64x2,
                         .bool,
-                        .parse_tag_union_spec,
                         .fields,
                         .field,
                         .crypto_sha256_digest,
@@ -25337,6 +25350,7 @@ const CallableRootScan = struct {
                         .crypto_blake3_digest,
                         .crypto_blake3_hasher,
                         => {},
+                        .parse_tag_union_spec => return true, // the parser callback
                         .list,
                         .box,
                         => {
@@ -25363,9 +25377,7 @@ const CallableRootScan = struct {
                     }
                     return null;
                 }
-                if (checked_types.nominalBackingTemplateForPayload(nominal)) |backing| {
-                    try children.add(backing);
-                }
+                if (try sink.nominalSlots(children, nominal)) return true;
             },
             .record => |record| {
                 for (0..record.fields.len()) |field_index| {
@@ -25578,7 +25590,8 @@ pub const CompileTimeRootPayload = union(enum) {
     fn_value: ConstFnId,
     discarded,
     expect,
-    /// A guarded hoisted root whose compile-time evaluation failed. Runtime
+    /// A guarded hoisted root whose compile-time evaluation failed, or a
+    /// hoisted validation whose failure no diagnostic reported. Runtime
     /// lowering evaluates its original expression and declaration in place.
     runtime,
 };
@@ -26328,14 +26341,20 @@ pub const CompileTimeRootTable = struct {
             if (selected.pattern.get()) |pattern| try selected_bindings.put(allocator, pattern, {});
         }
 
+        var validations = std.ArrayList(u32).empty;
+        defer validations.deinit(allocator);
         for (selected_hoisted_roots, 0..) |selected, selected_index| {
+            if (selected.body == .pattern_validation) {
+                try validations.append(allocator, @intCast(selected_index));
+                continue;
+            }
             const source_ty = if (selected.pattern.get()) |pattern|
                 ModuleEnv.varFrom(pattern)
             else
                 module.exprType(selected.expr);
             const source_is_function = sourceTypeIsFunction(module, source_ty);
             const kind: CompileTimeRootKind = switch (selected.value_kind) {
-                .data_constant => if (source_is_function)
+                .data_constant, .proven_data_constant => if (source_is_function)
                     checkedArtifactInvariant("function-typed selected root was classified as a data constant", .{})
                 else
                     .hoisted_constant,
@@ -26374,7 +26393,7 @@ pub const CompileTimeRootTable = struct {
                         const read_root = switch (target) {
                             .local => |index| local: {
                                 if (index >= eligibility_published) {
-                                    try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, roots.items[eligibility_published..]);
+                                    try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, roots.items[eligibility_published..], selected_hoisted_roots);
                                     eligibility_published = roots.items.len;
                                 }
                                 break :local roots.items[index];
@@ -26421,7 +26440,42 @@ pub const CompileTimeRootTable = struct {
             );
         }
 
-        try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, roots.items[eligibility_published..]);
+        try publishCompileTimeRootRequestEligibility(allocator, module, checked_types, roots.items[eligibility_published..], selected_hoisted_roots);
+        if (validations.items.len != 0) {
+            // Only a published owner getting a request evaluates the match.
+            // Pattern extractions cannot forward: even a callable extraction
+            // has to run the pattern. Other selected expression owners are data.
+            var owners = collections.DenseMapUnmanaged(CIR.Node.Idx, void).empty;
+            defer owners.deinit(allocator);
+            for (roots.items) |owner| {
+                if (owner.request_eligibility != .eligible) continue;
+                const body = owner.hoisted_body orelse continue;
+                switch (body) {
+                    .expr => try owners.put(allocator, ModuleEnv.nodeIdxFrom(owner.rootExpr()), {}),
+                    .pattern_extraction => |extraction| try owners.put(allocator, ModuleEnv.nodeIdxFrom(extraction.scrutinee_pattern), {}),
+                    .pattern_error, .valueless_binding, .pattern_validation => {},
+                }
+            }
+            for (validations.items) |index| {
+                const selected = selected_hoisted_roots[index];
+                const validation = selected.body.pattern_validation;
+                if (owners.contains(ModuleEnv.nodeIdxFrom(validation.scrutinee_pattern))) continue;
+                if (selected.validation_owner_expr.get()) |expr| if (owners.contains(ModuleEnv.nodeIdxFrom(expr))) continue;
+                const body = try selectedHoistedRootBody(allocator, module, checked_types, module_index, selected);
+                try appendCompileTimeRoot(&roots, allocator, .{
+                    .module_idx = module.moduleIndex(),
+                    .kind = .hoisted_validation,
+                    .source = .{ .hoisted = .{ .index = index, .expr = selected.expr } },
+                    .hoisted_body = selected.body,
+                    .pattern = body.pattern,
+                    .expr = body.expr,
+                    .checked_type = body.checked_type,
+                    .request_eligibility = .eligible, // validates the pattern and returns unit
+                    .payload = .pending,
+                    .guarded = selected.guarded,
+                });
+            }
+        }
         try completeConstantReadersWithWriter(allocator, bodies, roots.items, constant_readers.items, &scope);
 
         if (base.dev_diagnostics.isSet(.hoist_root_stats)) {
@@ -26661,11 +26715,13 @@ fn publishCompileTimeRootRequestEligibility(
     module: TypedCIR.Module,
     checked_types: *const CheckedTypePublication,
     roots: []CompileTimeRoot,
+    selected: []const hoist_roots.SelectedHoistedRoot,
 ) Allocator.Error!void {
     var concrete_context = NonConcreteRootScan{ .checked_types = &checked_types.store };
     var concrete = NonConcreteRootTraversal.init(allocator, &concrete_context);
     defer concrete.deinit();
-    var callable_context = CallableRootScan{ .checked_types = &checked_types.store };
+    var callable_context = CallableRootScan.init(allocator, &checked_types.store);
+    defer callable_context.reach.deinit();
     var callable = CallableRootTraversal.init(allocator, &callable_context);
     defer callable.deinit();
     for (roots) |*root| {
@@ -26682,7 +26738,7 @@ fn publishCompileTimeRootRequestEligibility(
                 .def => |def_idx| module.def(def_idx).data.annotation != null,
                 .expr, .statement, .hoisted, .required_binding, .literal, .literal_argument => false,
             },
-            .hoisted_constant,
+            .hoisted_constant => selected[root.source.hoisted.index].value_kind == .proven_data_constant,
             .hoisted_validation,
             .expect,
             .numeral_conversion,
@@ -26901,6 +26957,8 @@ const FormalReach = struct {
 const NominalFormalReach = struct {
     allocator: Allocator,
     checked_types: *const CheckedTypeStore,
+    /// Follow stored callable slots rather than type-variable mentions.
+    stored_slots: bool = false,
     /// Each declaration's position in `checked_types.nominal_declarations`,
     /// by key, for the representations that do not name the local position.
     by_key: std.AutoHashMapUnmanaged(canonical.NominalTypeKey, u32) = .empty,
@@ -26915,6 +26973,59 @@ const NominalFormalReach = struct {
         state: enum { unknown, computing, done } = .unknown,
         start: u32 = 0,
         len: u32 = 0,
+        intrinsic_slot: bool = false,
+    };
+
+    fn applySlots(self: *NominalFormalReach, children: anytype, nominal: CheckedNominalType, index: u32) Allocator.Error!bool {
+        if (self.entries.items[index].intrinsic_slot) return true;
+        for (nominal.args, self.slice(index)) |arg, formal| {
+            if (formal.value != null) try children.add(arg);
+        }
+        return false;
+    }
+
+    const SlotWalk = struct {
+        reach: *NominalFormalReach,
+        sink: ?*FormalSink,
+
+        pub fn add(self: SlotWalk, ty: CheckedTypeId) Allocator.Error!void {
+            try self.reach.walk(ty, .{});
+        }
+
+        pub fn addSlice(self: SlotWalk, types_: []const CheckedTypeId) Allocator.Error!void {
+            for (types_) |ty| try self.add(ty);
+        }
+
+        fn variable(self: SlotWalk, ty: CheckedTypeId) Allocator.Error!bool {
+            const sink = self.sink orelse return false;
+            for (sink.formals) |formal| if (ty == formal) {
+                try sink.noteMention(ty, .{});
+                return false;
+            };
+            return true;
+        }
+
+        fn nominalSlots(self: SlotWalk, children: anytype, nominal: CheckedNominalType) Allocator.Error!bool {
+            const index = (try self.reach.declarationIndex(nominal)) orelse return false;
+            if (self.sink != null) return self.reach.applySlots(children, nominal, index);
+            try self.reach.join(index);
+            try self.addSlice(nominal.args);
+            return false;
+        }
+
+        fn drain(self: SlotWalk) Allocator.Error!void {
+            while (self.reach.pending.pop()) |step| {
+                if ((try CallableRootScan.expand(self.reach.checked_types, self, step.ty, self)) == true) {
+                    if (self.sink) |sink| {
+                        const entry = &self.reach.entries.items[sink.index];
+                        sink.changed = sink.changed or !entry.intrinsic_slot;
+                        entry.intrinsic_slot = true;
+                        self.reach.pending.clearRetainingCapacity();
+                        return;
+                    }
+                }
+            }
+        }
     };
 
     fn deinit(self: *NominalFormalReach) void {
@@ -26977,7 +27088,9 @@ const NominalFormalReach = struct {
             self.visited.clearRetainingCapacity();
             try self.walk(declaration.backing, .{ .outside_container = true });
             const sink: CollectSink = .{ .reach = self };
-            while (self.pending.pop()) |step| try TypeVarMentions.expandStep(self.checked_types, step, sink);
+            if (self.stored_slots) {
+                try (SlotWalk{ .reach = self, .sink = null }).drain();
+            } else while (self.pending.pop()) |step| try TypeVarMentions.expandStep(self.checked_types, step, sink);
         }
         var changed = true;
         while (changed) {
@@ -26988,7 +27101,9 @@ const NominalFormalReach = struct {
                 self.visited.clearRetainingCapacity();
                 try self.walk(declaration.backing, .{ .outside_container = true });
                 var sink: FormalSink = .{ .reach = self, .formals = declaration.formalArgs(self.checked_types), .index = index };
-                while (self.pending.pop()) |step| try TypeVarMentions.expandStep(self.checked_types, step, &sink);
+                if (self.stored_slots) {
+                    try (SlotWalk{ .reach = self, .sink = &sink }).drain();
+                } else while (self.pending.pop()) |step| try TypeVarMentions.expandStep(self.checked_types, step, &sink);
                 changed = changed or sink.changed;
             }
         }
@@ -28725,9 +28840,10 @@ fn verifyCompileTimeRootPayloadMatchesKind(root: CompileTimeRoot, payload: Compi
             .runtime => root.guarded,
             .pending, .unevaluated, .fn_value, .discarded, .expect => false,
         },
+        // A failure no diagnostic reported leaves the validated destructure
+        // to runtime, guarded or not.
         .hoisted_validation => switch (payload) {
-            .discarded, .unevaluated => true,
-            .runtime => root.guarded,
+            .discarded, .unevaluated, .runtime => true,
             .pending, .const_node, .fn_value, .expect => false,
         },
         .callable_binding => switch (payload) {
@@ -40958,7 +41074,8 @@ test "root eligibility callable proofs propagate through an entire recursive com
     _ = try store.payloads.append(allocator, try store.commitPayload(allocator, .{ .tuple = try allocator.dupe(CheckedTypeId, &.{a}) }));
     _ = try store.payloads.append(allocator, try store.commitPayload(allocator, .{ .function = .{ .kind = .pure, .ret = empty } }));
     _ = try store.payloads.append(allocator, try store.commitPayload(allocator, .empty_record));
-    var context = CallableRootScan{ .checked_types = &store };
+    var context = CallableRootScan.init(allocator, &store);
+    defer context.reach.deinit();
     var traversal = CallableRootTraversal.init(allocator, &context);
     defer traversal.deinit();
     try std.testing.expect(try traversal.visit(a));
@@ -41161,6 +41278,36 @@ const SealedSlotsFixture = struct {
         try std.testing.expectEqualSlices(u32, scalar_slots.items, actual.items[1..]);
     }
 };
+
+test "root eligibility follows only stored nominal arguments through recursive declarations" {
+    var f = SealedSlotsFixture{};
+    defer f.deinit();
+    const unit = try f.add(.empty_record);
+    const callback = try f.function(&.{unit}, unit);
+    const left = f.reserve(0);
+    const right = f.reserve(1);
+    const a = try f.formal();
+    const b = try f.formal();
+    const c = try f.formal();
+    const d = try f.formal();
+    // Left(a,b) stores Right(b,a); Right(c,d) stores c and Left(d,c).
+    try f.define(left, &.{ a, b }, try f.apply(right, &.{ b, a }));
+    try f.define(right, &.{ c, d }, try f.unionOf(&.{ &.{c}, &.{try f.apply(left, &.{ d, c })} }, try f.add(.empty_tag_union)));
+    const constant = f.reserve(0);
+    try f.define(constant, &.{a}, try f.record(callback, unit));
+    const with_phantom = try f.apply(left, &.{ callback, unit });
+    const with_callback = try f.apply(left, &.{ unit, callback });
+    const with_intrinsic = try f.apply(constant, &.{unit});
+    const parse_spec = try f.nominal(.{ .builtin = .parse_tag_union_spec }, &.{ unit, unit, unit, unit });
+    var scan = CallableRootScan.init(std.testing.allocator, &f.store);
+    defer scan.reach.deinit();
+    var traversal = CallableRootTraversal.init(std.testing.allocator, &scan);
+    defer traversal.deinit();
+    try std.testing.expect(!try traversal.visit(with_phantom));
+    try std.testing.expect(try traversal.visit(with_callback));
+    try std.testing.expect(try traversal.visit(with_intrinsic));
+    try std.testing.expect(try traversal.visit(parse_spec));
+}
 
 test "sealed slot batching preserves bounded eligibility and duplicate slot order" {
     var f = SealedSlotsFixture{};

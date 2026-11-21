@@ -893,6 +893,7 @@ const Solver = struct {
         for (0..groups.count()) |group_index| {
             const group = groups.group(group_index);
             self.beginGroup(@intCast(group_index));
+            if (self.generalizing) try self.claimFunctionTypes(@intCast(group_index), group);
             if (self.body_order == .binding_groups_reversed) {
                 var index = group.len;
                 while (index > 0) {
@@ -971,6 +972,27 @@ const Solver = struct {
         if (self.generalizing) {
             self.program.types.escape_watch = groupOwner(group);
             self.program.types.escapes.clearRetainingCapacity();
+        }
+    }
+
+    /// Give `group` every class its functions' registered types reach that
+    /// no group owns yet: a function's type, and through its own lambda set
+    /// its capture slots, belong to the function's group. Every later group
+    /// relates them as part of its environment, whether or not this group's
+    /// solving relates them first. A leaf is claimed unexpanded, so its parts
+    /// belong to this group whichever group expands it.
+    fn claimFunctionTypes(self: *Solver, group: u32, fns: []const Lifted.FnId) Allocator.Error!void {
+        const types = &self.program.types;
+        const owner = groupOwner(group);
+        self.gen_stack.clearRetainingCapacity();
+        for (fns) |fn_id| try self.gen_stack.append(self.allocator, self.program.fn_tys.items[@backingInt(fn_id)]);
+        while (self.gen_stack.pop()) |next| {
+            const root = types.rootCompressed(next);
+            if (types.owners.items[@backingInt(root)] != Type.unowned) continue;
+            types.owners.items[@backingInt(root)] = owner;
+            self.gen_children.clearRetainingCapacity();
+            try self.appendGeneralizationChildren(root);
+            try self.gen_stack.appendSlice(self.allocator, self.gen_children.items);
         }
     }
 
@@ -6589,65 +6611,15 @@ fn sameMonoTypeDef(left: MonoType.TypeDef, right: MonoType.TypeDef) bool {
         left.site == right.site;
 }
 
-/// The digest tests build already-materialized solved types directly, so only
-/// the Solver fields read by `solvedTypeDigest` need test values. Callers own
-/// the returned solver's `solved_position_pool` and must deinit it.
-fn solvedTypeDigestTestSolver(
-    allocator: Allocator,
-    program: *Ast.Program,
-    name_store: *const names.NameStore,
-) Solver {
-    var solver: Solver = undefined;
-    solver.counters = null;
-    solver.allocator = allocator;
-    solver.mono_uninhabited = collections.DenseMap(MonoType.TypeId, bool).init(allocator);
-    defer solver.mono_uninhabited.deinit();
-    solver.uninhabited_memo = collections.DenseMap(Type.TypeVarId, UninhabitedAnswer).init(allocator);
-    defer solver.uninhabited_memo.deinit();
-    solver.mono_uninhabited_path_stops = 0;
-    solver.spare_clone_stacks = .empty;
-    solver.spare_clone_lists = .empty;
-    solver.solved_uninhabited_scratch = .{};
-    solver.solved_entry_marks = .empty;
-    solver.mono_uninhabited_scratch = .{};
-    solver.mono_entry_stops = .empty;
-    defer {
-        for (solver.spare_clone_stacks.items) |*stack| stack.deinit(allocator);
-        solver.spare_clone_stacks.deinit(allocator);
-        for (solver.spare_clone_lists.items) |*lists| lists.deinit(allocator);
-        solver.spare_clone_lists.deinit(allocator);
-        solver.solved_uninhabited_scratch.deinit(allocator);
-        solver.solved_entry_marks.deinit(allocator);
-        solver.mono_uninhabited_scratch.deinit(allocator);
-        solver.mono_entry_stops.deinit(allocator);
-    }
-    solver.uninhabited_path = .{};
-    defer solver.uninhabited_path.deinit(allocator);
-    solver.mono_uninhabited_path = .{};
-    defer solver.mono_uninhabited_path.deinit(allocator);
-    solver.program = program;
-    solver.lifted = undefined;
-    solver.lifted.names = name_store;
-    solver.solved_position_pool = collections.DenseMapPool(Type.TypeVarId, u32).init(allocator);
-    solver.tag_row_indexes = .empty;
-    solver.lambda_set_indexes = .empty;
-    solver.record_row_indexes = .empty;
-    solver.shared_leaf_context = null;
-    return solver;
-}
-
 test "solved type digest treats a transparent alias as its backing" {
     const allocator = std.testing.allocator;
 
-    var name_store = names.NameStore.init(allocator);
-    defer name_store.deinit();
+    var program = Ast.Program.init(allocator, emptyLiftedProgramForTest(allocator));
+    defer program.deinit();
+    const name_store = &program.lifted.names;
 
-    var program: Ast.Program = undefined;
-    program.types = Type.Store.init(allocator);
-    defer program.types.deinit();
-
-    var solver = solvedTypeDigestTestSolver(allocator, &program, &name_store);
-    defer solver.solved_position_pool.deinit();
+    var solver = try Solver.init(allocator, &program);
+    defer solver.deinit();
     const backing = try program.types.add(.{ .primitive = .u64 });
     const module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xA5))));
     const type_name = try name_store.internTypeName("Count");
@@ -6667,15 +6639,12 @@ test "solved type digest treats a transparent alias as its backing" {
 test "solved type digest is stable across clone-isomorphic cycles" {
     const allocator = std.testing.allocator;
 
-    var name_store = names.NameStore.init(allocator);
-    defer name_store.deinit();
+    var program = Ast.Program.init(allocator, emptyLiftedProgramForTest(allocator));
+    defer program.deinit();
+    const name_store = &program.lifted.names;
 
-    var program: Ast.Program = undefined;
-    program.types = Type.Store.init(allocator);
-    defer program.types.deinit();
-
-    var solver = solvedTypeDigestTestSolver(allocator, &program, &name_store);
-    defer solver.solved_position_pool.deinit();
+    var solver = try Solver.init(allocator, &program);
+    defer solver.deinit();
     const field_name = try name_store.internRecordFieldLabel("step");
     const callable = try program.types.add(.{ .lambda_set = .empty() });
 
@@ -6705,14 +6674,11 @@ test "solved type digest is stable across clone-isomorphic cycles" {
 test "lambda solved erased callable digest includes record field default identity" {
     const gpa = std.testing.allocator;
 
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
+    var program = Ast.Program.init(gpa, emptyLiftedProgramForTest(gpa));
+    defer program.deinit();
+    const name_store = &program.lifted.names;
     const field_name = try name_store.internRecordFieldLabel("retries");
     const module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xD5))));
-
-    var program: Ast.Program = undefined;
-    program.types = Type.Store.init(gpa);
-    defer program.types.deinit();
 
     const value_ty = try program.types.add(.{ .primitive = .u8 });
     const plain_ty = try program.types.add(.{ .record = try program.types.addFields(&.{.{
@@ -6731,40 +6697,8 @@ test "lambda solved erased callable digest includes record field default identit
         .default = .some(.{ .module = module, .expr_node = 4 }),
     }}) });
 
-    var lifted: Lifted.ProgramView = undefined;
-    lifted.names = &name_store;
-    var solver: Solver = undefined;
-    solver.counters = null;
-    solver.allocator = gpa;
-    solver.mono_uninhabited = collections.DenseMap(MonoType.TypeId, bool).init(gpa);
-    defer solver.mono_uninhabited.deinit();
-    solver.uninhabited_memo = collections.DenseMap(Type.TypeVarId, UninhabitedAnswer).init(gpa);
-    defer solver.uninhabited_memo.deinit();
-    solver.mono_uninhabited_path_stops = 0;
-    solver.spare_clone_stacks = .empty;
-    solver.spare_clone_lists = .empty;
-    solver.solved_uninhabited_scratch = .{};
-    solver.solved_entry_marks = .empty;
-    solver.mono_uninhabited_scratch = .{};
-    solver.mono_entry_stops = .empty;
-    defer {
-        for (solver.spare_clone_stacks.items) |*stack| stack.deinit(gpa);
-        solver.spare_clone_stacks.deinit(gpa);
-        for (solver.spare_clone_lists.items) |*lists| lists.deinit(gpa);
-        solver.spare_clone_lists.deinit(gpa);
-        solver.solved_uninhabited_scratch.deinit(gpa);
-        solver.solved_entry_marks.deinit(gpa);
-        solver.mono_uninhabited_scratch.deinit(gpa);
-        solver.mono_entry_stops.deinit(gpa);
-    }
-    solver.uninhabited_path = .{};
-    defer solver.uninhabited_path.deinit(gpa);
-    solver.mono_uninhabited_path = .{};
-    defer solver.mono_uninhabited_path.deinit(gpa);
-    solver.program = &program;
-    solver.lifted = lifted;
-    solver.solved_position_pool = collections.DenseMapPool(Type.TypeVarId, u32).init(gpa);
-    defer solver.solved_position_pool.deinit();
+    var solver = try Solver.init(gpa, &program);
+    defer solver.deinit();
 
     const plain_digest = try solver.solvedTypeDigest(plain_ty);
     const first_default_digest = try solver.solvedTypeDigest(first_default_ty);
@@ -6776,9 +6710,8 @@ test "lambda solved erased callable digest includes record field default identit
 test "inspectable backing unification isolates the structural type variable once" {
     const allocator = std.testing.allocator;
 
-    var program: Ast.Program = undefined;
-    program.types = Type.Store.init(allocator);
-    defer program.types.deinit();
+    var program = Ast.Program.init(allocator, emptyLiftedProgramForTest(allocator));
+    defer program.deinit();
 
     const structural = try program.types.add(.{ .primitive = .u64 });
     var backing = try program.types.add(.{ .primitive = .u64 });
@@ -6794,48 +6727,8 @@ test "inspectable backing unification isolates the structural type variable once
     const outer_named = backing;
     const vars_before_unify = program.types.varCount();
 
-    var solver: Solver = undefined;
-    solver.counters = null;
-    solver.allocator = allocator;
-    solver.mono_uninhabited = collections.DenseMap(MonoType.TypeId, bool).init(allocator);
-    defer solver.mono_uninhabited.deinit();
-    solver.uninhabited_memo = collections.DenseMap(Type.TypeVarId, UninhabitedAnswer).init(allocator);
-    defer solver.uninhabited_memo.deinit();
-    solver.mono_uninhabited_path_stops = 0;
-    solver.spare_clone_stacks = .empty;
-    solver.spare_clone_lists = .empty;
-    solver.solved_uninhabited_scratch = .{};
-    solver.solved_entry_marks = .empty;
-    solver.mono_uninhabited_scratch = .{};
-    solver.mono_entry_stops = .empty;
-    defer {
-        for (solver.spare_clone_stacks.items) |*stack| stack.deinit(allocator);
-        solver.spare_clone_stacks.deinit(allocator);
-        for (solver.spare_clone_lists.items) |*lists| lists.deinit(allocator);
-        solver.spare_clone_lists.deinit(allocator);
-        solver.solved_uninhabited_scratch.deinit(allocator);
-        solver.solved_entry_marks.deinit(allocator);
-        solver.mono_uninhabited_scratch.deinit(allocator);
-        solver.mono_entry_stops.deinit(allocator);
-    }
-    solver.uninhabited_path = .{};
-    defer solver.uninhabited_path.deinit(allocator);
-    solver.mono_uninhabited_path = .{};
-    defer solver.mono_uninhabited_path.deinit(allocator);
-    solver.program = &program;
-    solver.active_unifications = .{};
-    defer solver.active_unifications.deinit(allocator);
-    // `processRelate` begins and retires pairs in this set, so it must be real storage.
-    solver.active_private_evidence_relations = .{};
-    defer solver.active_private_evidence_relations.deinit(allocator);
-    solver.lift_count = 0;
-    solver.preserving_lifted_roots = false;
-    solver.unify_stack = .empty;
-    defer solver.unify_stack.deinit(allocator);
-    solver.solved_set_pool = collections.DenseMapPool(Type.TypeVarId, void).init(allocator);
-    defer solver.solved_set_pool.deinit();
-    solver.mono_set_pool = collections.DenseMapPool(MonoType.TypeId, void).init(allocator);
-    defer solver.mono_set_pool.deinit();
+    var solver = try Solver.init(allocator, &program);
+    defer solver.deinit();
 
     try solver.unify(structural, outer_named);
 
@@ -6847,9 +6740,8 @@ test "inspectable backing unification isolates the structural type variable once
 test "inspectable backing unification never redirects an owned backing to its nominal type" {
     const allocator = std.testing.allocator;
 
-    var program: Ast.Program = undefined;
-    program.types = Type.Store.init(allocator);
-    defer program.types.deinit();
+    var program = Ast.Program.init(allocator, emptyLiftedProgramForTest(allocator));
+    defer program.deinit();
 
     const backing = try program.types.add(.{ .primitive = .u64 });
     const named = try program.types.add(.{ .named = .{
@@ -6861,51 +6753,10 @@ test "inspectable backing unification never redirects an owned backing to its no
     } });
     const backing_representative = try program.types.add(.{ .primitive = .u64 });
 
-    var solver: Solver = undefined;
-    solver.counters = null;
-    solver.allocator = allocator;
-    solver.mono_uninhabited = collections.DenseMap(MonoType.TypeId, bool).init(allocator);
-    defer solver.mono_uninhabited.deinit();
-    solver.uninhabited_memo = collections.DenseMap(Type.TypeVarId, UninhabitedAnswer).init(allocator);
-    defer solver.uninhabited_memo.deinit();
-    solver.mono_uninhabited_path_stops = 0;
-    solver.spare_clone_stacks = .empty;
-    solver.spare_clone_lists = .empty;
-    solver.solved_uninhabited_scratch = .{};
-    solver.solved_entry_marks = .empty;
-    solver.mono_uninhabited_scratch = .{};
-    solver.mono_entry_stops = .empty;
-    defer {
-        for (solver.spare_clone_stacks.items) |*stack| stack.deinit(allocator);
-        solver.spare_clone_stacks.deinit(allocator);
-        for (solver.spare_clone_lists.items) |*lists| lists.deinit(allocator);
-        solver.spare_clone_lists.deinit(allocator);
-        solver.solved_uninhabited_scratch.deinit(allocator);
-        solver.solved_entry_marks.deinit(allocator);
-        solver.mono_uninhabited_scratch.deinit(allocator);
-        solver.mono_entry_stops.deinit(allocator);
-    }
-    solver.uninhabited_path = .{};
-    defer solver.uninhabited_path.deinit(allocator);
-    solver.mono_uninhabited_path = .{};
-    defer solver.mono_uninhabited_path.deinit(allocator);
-    solver.program = &program;
-    solver.lifted = undefined;
-    solver.active_unifications = .{};
-    defer solver.active_unifications.deinit(allocator);
-    // `processRelate` begins and retires pairs in this set, so it must be real storage.
-    solver.active_private_evidence_relations = .{};
-    defer solver.active_private_evidence_relations.deinit(allocator);
-    solver.lift_count = 0;
-    solver.preserving_lifted_roots = false;
-    solver.unify_stack = .empty;
-    defer solver.unify_stack.deinit(allocator);
+    var solver = try Solver.init(allocator, &program);
+    defer solver.deinit();
     program.types.markNamedBacking(backing);
     try program.types.setLink(backing, backing_representative);
-    solver.solved_set_pool = collections.DenseMapPool(Type.TypeVarId, void).init(allocator);
-    defer solver.solved_set_pool.deinit();
-    solver.mono_set_pool = collections.DenseMapPool(MonoType.TypeId, void).init(allocator);
-    defer solver.mono_set_pool.deinit();
 
     try solver.unify(backing, named);
 
@@ -7620,6 +7471,57 @@ test "lambda solved traverses deep sequential and nested expressions without nat
     try solver.solve();
     try std.testing.expectEqual(solver.expr_done.bit_length, solver.expr_done.count());
     try std.testing.expectEqual(solver.inferredExpr(unit), solver.inferredExpr(body));
+}
+
+test "issue 13197: a monomorphic group's function type stays its group's when a later group relates it" {
+    // design.md "Lambda Set Generalization": `shared_a` shares its body
+    // expression with another function, so its group is monomorphic, and
+    // nothing in that group relates its argument's callable slot.
+    // `pass` relates it to its own argument; `use` then calls `shared_a`
+    // directly before instantiating `pass`. That argument type is
+    // `shared_a`'s, an older class to `pass`, never a node of its scheme.
+    const allocator = std.testing.allocator;
+    var lifted = emptyLiftedProgramForTest(allocator);
+    var lifted_owned = true;
+    errdefer if (lifted_owned) lifted.deinit();
+    var symbols: Common.SymbolGen = .{};
+    const int = try lifted.types.add(.{ .primitive = .i64 });
+    const callback = try lifted.types.add(.{ .func = .{ .args = try lifted.types.addSpan(&.{int}), .ret = int } });
+    const pair = try lifted.types.add(.{ .tuple = try lifted.types.addSpan(&.{ int, int }) });
+    // Only type flow is under test; no execution reads this value.
+    const shared = try lifted.addExpr(.{ .ty = int, .data = .uninitialized });
+
+    const ignored = try lifted.addLocal(symbols.fresh(), callback);
+    const shared_a = try lifted.addFn(.{ .symbol = symbols.fresh(), .args = try lifted.addTypedLocalSpan(&.{.{ .local = ignored, .ty = callback }}), .captures = .empty(), .body = .{ .roc = shared }, .ret = int });
+    _ = try lifted.addFn(.{ .symbol = symbols.fresh(), .args = .empty(), .captures = .empty(), .body = .{ .roc = shared }, .ret = int });
+
+    const passed = try lifted.addLocal(symbols.fresh(), callback);
+    const pass_arg = try lifted.addExpr(.{ .ty = callback, .data = .{ .local = passed } });
+    const pass_body = try lifted.addExpr(.{ .ty = int, .data = .{ .call_proc = .{ .callee = .{ .lifted = shared_a }, .args = try lifted.addExprSpan(&.{pass_arg}) } } });
+    const pass = try lifted.addFn(.{ .symbol = symbols.fresh(), .args = try lifted.addTypedLocalSpan(&.{.{ .local = passed, .ty = callback }}), .captures = .empty(), .body = .{ .roc = pass_body }, .ret = int });
+
+    const used = try lifted.addLocal(symbols.fresh(), callback);
+    const direct_arg = try lifted.addExpr(.{ .ty = callback, .data = .{ .local = used } });
+    const direct = try lifted.addExpr(.{ .ty = int, .data = .{ .call_proc = .{ .callee = .{ .lifted = shared_a }, .args = try lifted.addExprSpan(&.{direct_arg}) } } });
+    const through_arg = try lifted.addExpr(.{ .ty = callback, .data = .{ .local = used } });
+    const through = try lifted.addExpr(.{ .ty = int, .data = .{ .call_proc = .{ .callee = .{ .lifted = pass }, .args = try lifted.addExprSpan(&.{through_arg}) } } });
+    const use_body = try lifted.addExpr(.{ .ty = pair, .data = .{ .tuple = try lifted.addExprSpan(&.{ direct, through }) } });
+    _ = try lifted.addFn(.{ .symbol = symbols.fresh(), .args = try lifted.addTypedLocalSpan(&.{.{ .local = used, .ty = callback }}), .captures = .empty(), .body = .{ .roc = use_body }, .ret = pair });
+
+    var program = Ast.Program.init(allocator, lifted);
+    lifted_owned = false;
+    lifted = undefined;
+    defer program.deinit();
+    program.binding_groups = try program.lifted.bindingGroups(allocator);
+    var solver = try solveProgram(allocator, &program, .binding_groups, null, null);
+    defer solver.deinit();
+
+    const shared_group = program.poly.fn_groups.items[@backingInt(shared_a)];
+    const pass_group = program.poly.fn_groups.items[@backingInt(pass)];
+    try std.testing.expect(program.binding_groups.shares_exprs[shared_group]);
+    try std.testing.expect(program.poly.schemes.items[pass_group].isGeneric());
+    const shared_fn = program.types.rootContentCompressed(program.fn_tys.items[@backingInt(shared_a)]).func;
+    try std.testing.expectEqual(Solver.groupOwner(shared_group), program.types.ownerOf(program.types.spanItem(shared_fn.args, 0)));
 }
 
 test "lambda solved compact record updates relate only unchanged field representations" {
