@@ -1,0 +1,126 @@
+# punkroc's own CI (not upstream Roc's):
+#
+# - golden: on every push to and PR into `punkroc`, build the compiler, run
+#   the translator's unit tests and the golden tests of examples/punk/
+#   (test/punk/golden.sh).
+# - upstream: on the 1st and 15th of each month (and by hand), merge
+#   roc-lang/roc's main into a new branch, run the same tests on it, and open
+#   a PR into `punkroc` only when they pass. On a conflict or a failing test
+#   it opens an issue instead. It only ever fetches from roc-lang/roc;
+#   everything it pushes goes to this repository.
+
+name: punkroc
+
+on:
+  push:
+    branches: [punkroc]
+  pull_request:
+    branches: [punkroc]
+  schedule:
+    - cron: '23 5 1,15 * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: punkroc-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golden:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+      - &setup_zig
+        uses: xyzzylabs/setup-zig@09d85d9dbb73308882e7a26e61a8f706eed40df1 # ratchet:xyzzylabs/setup-zig@v1.0.2
+        with:
+          version: 0.17.1
+          use-cache: false
+      - &cache_deps
+        name: Cache Zig dependency packages
+        uses: actions/cache@v6.1.0 # ratchet:actions/cache@v6.1.0
+        with:
+          path: ${{ env.ZIG_GLOBAL_CACHE_DIR }}/p
+          key: zig-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-deps-${{ runner.os }}-${{ runner.arch }}-
+      - name: Build and test
+        run: |
+          set -eu
+          zig test src/punk/test.zig
+          zig build roc
+          sh test/punk/setup.sh
+          sh test/punk/golden.sh
+
+  upstream:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+        with:
+          ref: punkroc
+          fetch-depth: 0
+      - name: Merge roc-lang/roc main
+        id: merge
+        run: |
+          set -eu
+          git config user.name "punkroc-ci"
+          git config user.email "punkroc-ci@users.noreply.github.com"
+          git remote add upstream https://github.com/roc-lang/roc.git
+          # Never push to upstream.
+          git remote set-url --push upstream no-push-to-upstream
+          git fetch --no-tags upstream main
+          branch="upstream-merge/$(date -u +%Y-%m-%d)"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "upstream=$(git rev-parse --short FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "punkroc already has upstream's main"
+            echo "nothing=yes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git checkout -b "$branch"
+          if ! git merge --no-edit -m "Merge roc-lang/roc main ($(git rev-parse --short FETCH_HEAD)) into punkroc" FETCH_HEAD; then
+            git diff --name-only --diff-filter=U > conflicts.txt
+            echo "conflict=yes" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+      - *setup_zig
+      - *cache_deps
+      - name: Build and test the merge
+        if: steps.merge.outputs.nothing != 'yes'
+        run: |
+          set -eu
+          zig test src/punk/test.zig
+          zig build roc
+          sh test/punk/setup.sh
+          sh test/punk/golden.sh
+      - name: Push the branch and open a PR
+        if: steps.merge.outputs.nothing != 'yes'
+        run: |
+          set -eu
+          branch="${{ steps.merge.outputs.branch }}"
+          git push origin "$branch"
+          gh pr create --base punkroc --head "$branch" \
+            --title "Merge upstream Roc (${{ steps.merge.outputs.upstream }})" \
+            --body "Merge of roc-lang/roc main (${{ steps.merge.outputs.upstream }}) into punkroc. The translator tests and the golden tests of examples/punk/ passed on this merge ([run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}))."
+      - name: Report a failed merge
+        if: failure()
+        run: |
+          conflicts=""
+          [ -f conflicts.txt ] && conflicts="Conflicting files:
+          $(sed 's/^/- /' conflicts.txt)"
+          gh issue create \
+            --title "Upstream merge failed ($(date -u +%Y-%m-%d))" \
+            --body "Merging roc-lang/roc main into punkroc failed, so no PR was opened. See ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}.
+          $conflicts"
