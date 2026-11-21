@@ -1,8 +1,14 @@
-app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
+app [main!] { pf: platform "../../../test/punk/platform/main.roc" }
 
 import pf.Stdout
+import pf.File
+import pf.Arg
 
-{-| Advent of Code 2024, day 1: Historian Hysteria. -}
+{-| Advent of Code 2024, day 1: Historian Hysteria.
+
+Without arguments it solves the example; `roc Day01.punk input.txt` solves
+your own puzzle input.
+-}
 
 example =
     """
@@ -15,7 +21,16 @@ example =
     """
 
 main! = fn () ->
-    case parse example of
+    case Arg.list! () of
+        [path] ->
+            case File.read! path of
+                Ok input -> solve! (String.trim input)
+                Err (FileErr msg) -> Stdout.line! msg
+        _ ->
+            solve! example
+
+solve! = fn input ->
+    case parse input of
         Ok (left, right) ->
             Stdout.line! "Part 1: ${U64.toStr (part1 left right)}"
             Stdout.line! "Part 2: ${U64.toStr (part2 left right)}"

@@ -1,0 +1,22 @@
+app [main!] { pf: platform "../../../test/punk/platform/main.roc" }
+
+import pf.Stdout
+import pf.Stdin
+import pf.File
+import pf.Arg
+
+{-| punkroc's platform: the command line, files and standard input. -}
+
+main! = fn () ->
+    case Arg.list! () of
+        [path] ->
+            case File.read! path of
+                Ok text -> report! "${path}" text
+                Err (FileErr msg) -> Stdout.line! msg
+        _ ->
+            report! "stdin" (Stdin.readAll! ())
+
+report! = fn name, text ->
+    lines = String.lines (String.trim text)
+    Stdout.line! "${name}: ${String.fromInt (List.length lines)} lines"
+    Stdout.line! "first: ${Maybe.withDefault "" (List.head lines)}"
