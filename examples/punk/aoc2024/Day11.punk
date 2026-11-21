@@ -31,9 +31,8 @@ blink = fn stones ->
         |> List.joinMap (fn (stone, count) -> List.map (fn s -> (s, count)) (change stone))
         |> List.fold addCount Dict.empty
 
--- List.fold hands the accumulator first (Roc), not last (Elm's foldl)
-addCount : Counts -> (U64, U64) -> Counts
-addCount = fn counts, (stone, count) ->
+addCount : (U64, U64) -> Counts -> Counts
+addCount = fn (stone, count), counts ->
     Dict.update stone (fn old -> Ok (Result.withDefault 0 old + count)) counts
 
 change : U64 -> List U64

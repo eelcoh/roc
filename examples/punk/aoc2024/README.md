@@ -16,6 +16,6 @@ zig-out/bin/roc examples/punk/aoc2024/Day06.punk
 | 3   | 161, 48           | parsing with `Str.splitOn`, `[first, ..]` patterns |
 | 4   | 18, 9             | the `Grid` module, records, `Result.andThen` |
 | 5   | 143, 123          | `Set`, `List.sortWith`, Elm-style order tags |
-| 6   | 41, 6             | own union type, record update, loop detection |
+| 6   | 41, 6             | own union type with `==`, record update, loop detection |
 | 7   | 3749, 11387       | `type Op`, recursion with early stop |
 | 11  | 55312, 65601038650482 | `Dict` of counts, `List.fold` |

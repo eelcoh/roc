@@ -1,7 +1,7 @@
 app [main!] { pf: platform "../../../test/fx/platform/main.roc" }
 
 import pf.Stdout
-import Grid exposing (Cells, Point)
+import Grid exposing (Grid, Point)
 
 {-| Advent of Code 2024, day 6: Guard Gallivant. -}
 
@@ -34,7 +34,7 @@ main! = fn () ->
         Err _ ->
             Stdout.line! "no guard on the map"
 
-visitedBy : Cells -> Guard -> Set Point
+visitedBy : Grid -> Guard -> Set Point
 visitedBy = fn grid, guard ->
     case patrol (fn p -> Grid.at grid p) guard Set.empty of
         Leaves visited -> visited
@@ -58,20 +58,13 @@ turnRight = fn { row, col } ->
     { row = col, col = -row }
 
 -- An obstacle only matters on the guard's path; try each of those cells
-part2 : Cells -> Guard -> Set Point -> U64
+part2 : Grid -> Guard -> Set Point -> U64
 part2 = fn grid, guard, visited ->
     visited
         |> Set.toList
         |> List.dropIf (fn p -> p == guard.pos)
-        |> List.countIf (fn obstacle -> loops (patrol (withObstacle grid obstacle) guard Set.empty))
+        |> List.countIf (fn obstacle -> patrol (withObstacle grid obstacle) guard Set.empty == Loops)
 
--- `outcome == Loops` needs an is_eq method on Outcome, so match instead
-loops : Outcome -> Bool
-loops = fn outcome ->
-    case outcome of
-        Loops -> True
-        Leaves _ -> False
-
-withObstacle : Cells -> Point -> Point -> U8
+withObstacle : Grid -> Point -> Point -> U8
 withObstacle = fn grid, obstacle, p ->
     if p == obstacle then '#' else Grid.at grid p

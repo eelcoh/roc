@@ -1550,6 +1550,14 @@ const Emitter = struct {
     resolver: ?Resolver = null,
     /// Imported modules punkroc could read, by the name the file uses for them.
     modules: std.StringHashMapUnmanaged(*const Interface) = .empty,
+    /// The module's own name when it has a type alias of that name; see
+    /// `Interface.own_alias`.
+    own_alias: ?[]const u8 = null,
+    /// Set while writing the type that carries a module's block.
+    in_own_type: bool = false,
+    /// Type names an import exposes unqualified that are such an alias of
+    /// another module, with their Roc spelling (`Grid` is `Grid.GridAlias`).
+    exposed_aliases: std.StringHashMapUnmanaged([]const u8) = .empty,
 
     /// `order` is not `.none` for names imported unqualified from a Roc
     /// module (`import Json exposing [decode]`).
@@ -1579,7 +1587,7 @@ const Emitter = struct {
     fn emitModule(e: *Emitter, items: []Item) Error!void {
         try e.loadImports(items);
         try e.bindItems(items);
-        if (moduleHeaderName(items) != null) _ = try e.interfaceOf(items);
+        if (moduleHeaderName(items) != null) e.own_alias = (try e.interfaceOf(items)).own_alias;
         const module_name = moduleHeaderName(items) orelse {
             try e.emitItems(items);
             try e.w("\n");
@@ -1611,7 +1619,9 @@ const Emitter = struct {
         if (top.items.len > 0) try e.w("\n\n");
         if (own_type) |t| {
             try e.comments(t.comments);
+            e.in_own_type = true;
             try e.emitItems(&.{.{ .comments = &.{}, .blank_before = false, .kind = t.kind }});
+            e.in_own_type = false;
         } else {
             try e.w(module_name);
             try e.w(" := []");
@@ -1619,12 +1629,36 @@ const Emitter = struct {
         try e.w(".{");
         e.indent += 1;
         try e.nl();
+        if (own_type) |t| if (!definesEquality(inner.items)) {
+            try e.emitEquality(t.kind.type_nominal.alts);
+            if (inner.items.len > 0) try e.w("\n");
+            try e.nl();
+        };
         try e.emitItems(inner.items);
         e.indent -= 1;
         try e.w("\n}\n");
     }
 
-    fn moduleHeaderName(items: []Item) ?[]const u8 {
+    fn hasNominal(items: []const Item, name: []const u8) bool {
+        for (items) |item| if (item.kind == .type_nominal and std.mem.eql(u8, item.kind.type_nominal.name, name)) return true;
+        return false;
+    }
+
+    /// How a type name is written in Roc. A type alias with the name of its
+    /// module (`Grid` in `module Grid`) becomes `GridAlias`, because in Roc
+    /// the module itself is the type `Grid`.
+    fn rocTypeName(e: *Emitter, n: []const u8) Error![]const u8 {
+        if (e.own_alias) |own| if (std.mem.eql(u8, n, own)) return std.fmt.allocPrint(e.a, "{s}Alias", .{n});
+        if (e.exposed_aliases.get(n)) |roc| return roc;
+        if (std.mem.findScalarLast(u8, n, '.')) |dot| {
+            if (e.modules.get(n[0..dot])) |iface| if (iface.own_alias) |own| if (std.mem.eql(u8, n[dot + 1 ..], own)) {
+                return std.fmt.allocPrint(e.a, "{s}Alias", .{n});
+            };
+        }
+        return n;
+    }
+
+    fn moduleHeaderName(items: []const Item) ?[]const u8 {
         if (items.len == 0) return null;
         const raw = switch (items[0].kind) {
             .raw => |r| r,
@@ -1653,7 +1687,7 @@ const Emitter = struct {
                 },
                 .def => |d| try e.emitDef(d.pat, d.body),
                 .type_alias => |ta| {
-                    try e.emitTypeHead(ta.name, ta.params);
+                    try e.emitTypeHead(try e.rocTypeName(ta.name), ta.params);
                     try e.w(" : ");
                     try e.emitType(ta.ty, false);
                 },
@@ -1665,6 +1699,16 @@ const Emitter = struct {
                         try e.emitType(alt, false);
                     }
                     try e.w("]");
+                    // The module's own type gets its block from emitModule.
+                    if (!e.in_own_type) {
+                        try e.w(".{");
+                        e.indent += 1;
+                        try e.nl();
+                        try e.emitEquality(tn.alts);
+                        e.indent -= 1;
+                        try e.nl();
+                        try e.w("}");
+                    }
                 },
                 .expect => |b| {
                     try e.w("expect ");
@@ -1676,6 +1720,83 @@ const Emitter = struct {
                 try e.w(c);
             }
         }
+    }
+
+    fn definesEquality(items: []const Item) bool {
+        for (items) |item| switch (item.kind) {
+            .def => |d| if (d.pat.* == .ident and (std.mem.eql(u8, d.pat.ident, "isEq") or std.mem.eql(u8, d.pat.ident, "toHash"))) return true,
+            .raw, .anno, .type_alias, .type_nominal, .expect => {},
+        };
+        return false;
+    }
+
+    /// Roc compares and hashes a nominal type only through its `is_eq` and
+    /// `to_hash` methods. Elm compares every custom type structurally, so
+    /// punkroc writes these methods for each `type`: equal when the tags and
+    /// all their values are equal.
+    fn emitEquality(e: *Emitter, alts: []*Type) Error!void {
+        try e.w("is_eq = |punk_x, punk_y| match (punk_x, punk_y) {");
+        e.indent += 1;
+        for (alts) |alt| {
+            const tag = tagOf(alt) orelse continue;
+            try e.nl();
+            try e.w("(");
+            try e.emitTagPattern(tag.name, tag.n, "a");
+            try e.w(", ");
+            try e.emitTagPattern(tag.name, tag.n, "b");
+            try e.w(") => ");
+            if (tag.n == 0) try e.w("True");
+            for (0..tag.n) |i| {
+                if (i > 0) try e.w(" and ");
+                try e.buf.print(e.a, "punk_a{d} == punk_b{d}", .{ i + 1, i + 1 });
+            }
+        }
+        if (alts.len > 1) {
+            try e.nl();
+            try e.w("_ => False");
+        }
+        e.indent -= 1;
+        try e.nl();
+        try e.w("}");
+        try e.w("\n");
+        try e.nl();
+        try e.w("to_hash = |punk_x, punk_h| match punk_x {");
+        e.indent += 1;
+        for (alts, 0..) |alt, k| {
+            const tag = tagOf(alt) orelse continue;
+            try e.nl();
+            try e.emitTagPattern(tag.name, tag.n, "a");
+            try e.w(" => ");
+            var j = tag.n;
+            while (j > 0) : (j -= 1) try e.buf.print(e.a, "punk_a{d}.to_hash(", .{j});
+            try e.buf.print(e.a, "Hasher.write_u64(punk_h, {d})", .{k});
+            for (0..tag.n) |_| try e.w(")");
+        }
+        e.indent -= 1;
+        try e.nl();
+        try e.w("}");
+    }
+
+    const TagShape = struct { name: []const u8, n: usize };
+
+    fn tagOf(alt: *const Type) ?TagShape {
+        return switch (alt.*) {
+            .name => |n| .{ .name = n, .n = 0 },
+            .app => |app| .{ .name = app.head, .n = app.args.len },
+            .paren => |inner| tagOf(inner),
+            .func, .record, .tuple, .unit, .union_ => null,
+        };
+    }
+
+    fn emitTagPattern(e: *Emitter, name: []const u8, n: usize, prefix: []const u8) Error!void {
+        try e.w(name);
+        if (n == 0) return;
+        try e.w("(");
+        for (0..n) |i| {
+            if (i > 0) try e.w(", ");
+            try e.buf.print(e.a, "punk_{s}{d}", .{ prefix, i + 1 });
+        }
+        try e.w(")");
     }
 
     fn emitTypeHead(e: *Emitter, name: []const u8, params: [][]const u8) Error!void {
@@ -1897,6 +2018,10 @@ const Emitter = struct {
             const list = imp.exposing orelse continue;
             var names = std.mem.tokenizeAny(u8, list, ", \t\r\n");
             while (names.next()) |raw| {
+                if (iface.own_alias) |own| if (std.mem.eql(u8, raw, own)) {
+                    try e.exposed_aliases.put(e.a, raw, try std.fmt.allocPrint(e.a, "{s}.{s}Alias", .{ imp.alias, own }));
+                    continue;
+                };
                 if (!std.ascii.isLower(raw[0]) and raw[0] != '_') continue;
                 const qualified = try std.fmt.allocPrint(e.a, "{s}.{s}", .{ imp.alias, raw });
                 try e.checkExposedAt(qualified, raw);
@@ -1916,18 +2041,26 @@ const Emitter = struct {
     /// snake_case names, and no `(..)` after a type.
     fn emitImport(e: *Emitter, raw: []const u8) Error!void {
         const span = exposingSpan(raw) orelse return e.w(raw);
-        try e.w(raw[0..span.open]);
-        try e.w("[");
+        var list: std.ArrayList(u8) = .empty;
         var names = std.mem.tokenizeAny(u8, raw[span.open + 1 .. span.close], ", \t\r\n");
-        var first = true;
         while (names.next()) |n| {
             const name = if (std.mem.endsWith(u8, n, "(..)")) n[0 .. n.len - 4] else n;
             if (name.len == 0) continue;
-            if (!first) try e.w(", ");
-            first = false;
-            try e.w(if (std.ascii.isLower(name[0])) try snake(e.a, name) else name);
+            // An alias with the module's name is used as `Grid.GridAlias`.
+            if (e.exposed_aliases.contains(name)) continue;
+            if (list.items.len > 0) try list.appendSlice(e.a, ", ");
+            try list.appendSlice(e.a, if (std.ascii.isLower(name[0])) try snake(e.a, name) else name);
         }
-        try e.w("]");
+        if (list.items.len == 0) {
+            // Nothing left to expose: drop `exposing` altogether.
+            const at = std.mem.find(u8, raw, "exposing").?;
+            try e.w(std.mem.trimEnd(u8, raw[0..at], " \t"));
+        } else {
+            try e.w(raw[0..span.open]);
+            try e.w("[");
+            try e.w(list.items);
+            try e.w("]");
+        }
         if (span.close < raw.len) try e.w(raw[span.close + 1 ..]);
     }
 
@@ -2032,6 +2165,9 @@ const Emitter = struct {
             },
             .type_alias => |ta| try iface.types.put(e.a, ta.name, &.{}),
             .raw, .expect => {},
+        };
+        if (moduleHeaderName(items)) |m| if (iface.types.get(m)) |tags| if (tags.len == 0 and !hasNominal(items, m)) {
+            iface.own_alias = m;
         };
         if (items.len == 0 or items[0].kind != .raw) return iface;
         const header = items[0].kind.raw;
@@ -2328,9 +2464,44 @@ const Emitter = struct {
         for (0..args.len) |i| {
             if (i > 0) try e.w(", ");
             const src = if (order) |f| f.source(i) else i;
+            if (order) |f| if (f.state_last > 0 and src == 0) {
+                try e.emitStateLast(args[src], f.state_last);
+                continue;
+            };
             try e.emitItem(args[src]);
         }
         try e.w(")");
+    }
+
+    /// The callback of a fold, which punkroc writes with the state last
+    /// (`fn item, state -> ...`, Elm's order) and Roc calls with the state
+    /// first. A lambda gets its parameters turned around; any other function
+    /// is wrapped: `|state, item| f(item, state)`.
+    fn emitStateLast(e: *Emitter, f: *Expr, n: u8) Error!void {
+        var inner = f;
+        while (inner.* == .paren) inner = inner.paren;
+        if (inner.* == .lambda and inner.lambda.params.len == n) {
+            const ps = inner.lambda.params;
+            const turned = try e.a.alloc(*Pattern, n);
+            turned[0] = ps[n - 1];
+            for (0..n - 1) |i| turned[i + 1] = ps[i];
+            return e.emitExpr(try e.newExpr(.{ .lambda = .{ .params = turned, .body = inner.lambda.body } }));
+        }
+        var names: std.ArrayList([]const u8) = .empty;
+        for (0..n) |_| {
+            e.fresh += 1;
+            try names.append(e.a, try std.fmt.allocPrint(e.a, "punk_s{d}", .{e.fresh}));
+        }
+        const call_args = try e.a.alloc(*Expr, n);
+        for (0..n - 1) |i| call_args[i] = try e.newExpr(.{ .ident_raw = names.items[i + 1] });
+        call_args[n - 1] = try e.newExpr(.{ .ident_raw = names.items[0] });
+        try e.w("|");
+        for (names.items, 0..) |name, i| {
+            if (i > 0) try e.w(", ");
+            try e.w(name);
+        }
+        try e.w("| ");
+        try e.emitExpr(try e.newExpr(.{ .app = .{ .func = f, .args = call_args } }));
     }
 
     /// The number of arguments a function type takes. `A -> B -> C` takes
@@ -2657,9 +2828,9 @@ const Emitter = struct {
 
     fn emitType(e: *Emitter, t: *Type, in_args: bool) Error!void {
         switch (t.*) {
-            .name => |n| try e.w(if (std.ascii.isLower(n[0])) try snake(e.a, n) else n),
+            .name => |n| try e.w(if (std.ascii.isLower(n[0])) try snake(e.a, n) else try e.rocTypeName(n)),
             .app => |app| {
-                try e.w(if (std.mem.eql(u8, app.head, "Result")) "Try" else app.head);
+                try e.w(if (std.mem.eql(u8, app.head, "Result")) "Try" else try e.rocTypeName(app.head));
                 try e.w("(");
                 for (app.args, 0..) |arg, i| {
                     if (i > 0) try e.w(", ");

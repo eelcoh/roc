@@ -32,6 +32,11 @@ pub const Order = enum {
 pub const Fn = struct {
     arity: u8,
     order: Order,
+    /// For folds whose callback takes the state first in Roc
+    /// (`|state, item| ...`): the callback's number of parameters. punkroc
+    /// passes the state last, as Elm's `foldl` (`fn item, state -> ...`).
+    /// 0 for every other function.
+    state_last: u8 = 0,
 
     /// The punkroc argument that goes in Roc position `i`.
     pub fn source(f: Fn, i: usize) usize {
@@ -189,12 +194,12 @@ const table = std.StaticStringMap(Fn).initComptime(.{
     .{ "List.map_try!", Fn{ .arity = 2, .order = .rotate } },
     .{ "List.keep_if_try", Fn{ .arity = 2, .order = .rotate } },
     .{ "List.keep_if_try!", Fn{ .arity = 2, .order = .rotate } },
-    .{ "List.fold_try", Fn{ .arity = 3, .order = .reverse } },
-    .{ "List.fold_try!", Fn{ .arity = 3, .order = .reverse } },
-    .{ "List.fold", Fn{ .arity = 3, .order = .reverse } },
-    .{ "List.fold_with_index", Fn{ .arity = 3, .order = .reverse } },
-    .{ "List.fold_until", Fn{ .arity = 3, .order = .reverse } },
-    .{ "List.fold_with_index_until", Fn{ .arity = 3, .order = .reverse } },
+    .{ "List.fold_try", Fn{ .arity = 3, .order = .reverse, .state_last = 2 } },
+    .{ "List.fold_try!", Fn{ .arity = 3, .order = .reverse, .state_last = 2 } },
+    .{ "List.fold", Fn{ .arity = 3, .order = .reverse, .state_last = 2 } },
+    .{ "List.fold_with_index", Fn{ .arity = 3, .order = .reverse, .state_last = 3 } },
+    .{ "List.fold_until", Fn{ .arity = 3, .order = .reverse, .state_last = 2 } },
+    .{ "List.fold_with_index_until", Fn{ .arity = 3, .order = .reverse, .state_last = 3 } },
     .{ "List.fold_rev", Fn{ .arity = 3, .order = .reverse } },
     .{ "List.starts_with", Fn{ .arity = 2, .order = .rotate } },
     .{ "List.ends_with", Fn{ .arity = 2, .order = .rotate } },
@@ -259,7 +264,7 @@ const table = std.StaticStringMap(Fn).initComptime(.{
     .{ "Iter.with_index", Fn{ .arity = 1, .order = .none } },
     .{ "Iter.keep_if", Fn{ .arity = 2, .order = .rotate } },
     .{ "Iter.drop_if", Fn{ .arity = 2, .order = .rotate } },
-    .{ "Iter.fold", Fn{ .arity = 3, .order = .reverse } },
+    .{ "Iter.fold", Fn{ .arity = 3, .order = .reverse, .state_last = 2 } },
     .{ "Iter.sum", Fn{ .arity = 1, .order = .none } },
     .{ "Iter.product", Fn{ .arity = 1, .order = .none } },
     .{ "Iter.min", Fn{ .arity = 1, .order = .none } },
@@ -295,8 +300,8 @@ const table = std.StaticStringMap(Fn).initComptime(.{
     .{ "Dict.from_iter", Fn{ .arity = 1, .order = .none } },
     .{ "Dict.keys", Fn{ .arity = 1, .order = .none } },
     .{ "Dict.values", Fn{ .arity = 1, .order = .none } },
-    .{ "Dict.fold", Fn{ .arity = 3, .order = .reverse } },
-    .{ "Dict.fold_until", Fn{ .arity = 3, .order = .reverse } },
+    .{ "Dict.fold", Fn{ .arity = 3, .order = .reverse, .state_last = 3 } },
+    .{ "Dict.fold_until", Fn{ .arity = 3, .order = .reverse, .state_last = 3 } },
     .{ "Dict.keep_if", Fn{ .arity = 2, .order = .rotate } },
     .{ "Dict.drop_if", Fn{ .arity = 2, .order = .rotate } },
     .{ "Dict.map", Fn{ .arity = 2, .order = .rotate } },
@@ -317,7 +322,7 @@ const table = std.StaticStringMap(Fn).initComptime(.{
     .{ "Set.insert", Fn{ .arity = 2, .order = .rotate } },
     .{ "Set.remove", Fn{ .arity = 2, .order = .rotate } },
     .{ "Set.to_list", Fn{ .arity = 1, .order = .none } },
-    .{ "Set.fold", Fn{ .arity = 3, .order = .reverse } },
+    .{ "Set.fold", Fn{ .arity = 3, .order = .reverse, .state_last = 2 } },
     .{ "Set.iter", Fn{ .arity = 1, .order = .none } },
     .{ "Set.iter_rev", Fn{ .arity = 1, .order = .none } },
     .{ "Set.from_list", Fn{ .arity = 1, .order = .none } },
@@ -334,6 +339,6 @@ const table = std.StaticStringMap(Fn).initComptime(.{
     .{ "Set.clear", Fn{ .arity = 1, .order = .none } },
     .{ "Set.subscript", Fn{ .arity = 2, .order = .rotate } },
     .{ "Set.from_iter", Fn{ .arity = 1, .order = .none } },
-    .{ "Set.fold_until", Fn{ .arity = 3, .order = .reverse } },
+    .{ "Set.fold_until", Fn{ .arity = 3, .order = .reverse, .state_last = 2 } },
     .{ "Set.join_map", Fn{ .arity = 2, .order = .rotate } },
 });
