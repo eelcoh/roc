@@ -20,6 +20,7 @@ type Shape = Circle F64 | Rect F64 F64  Shape := [Circle(F64), Rect(F64, F64)]
 - `mod.zig`: the `punk` compiler module; `toRoc` is what the compiler calls.
 - `translate.zig`: lexer, layout-sensitive parser and Roc emitter.
 - `stdlib.zig`: arity and argument order of the builtins (from `gen_stdlib.py`).
+- `interface.zig`: what punkroc knows about an imported module (step 4).
 - `main.zig`: the `punk2roc` command line tool.
 - `test.zig`: translation tests.
 
@@ -45,9 +46,8 @@ double = fn x ->                       }
 ```
 
 When the module declares `type Shape` with the module's own name, that type
-carries the block (`Shape := [Circle(F64), ...].{ area = ... }`). The
-`exposing` list is not checked yet: everything in the module is visible.
-See `examples/punk/imports/`.
+carries the block (`Shape := [Circle(F64), ...].{ area = ... }`). See
+`examples/punk/imports/` and "Roc compatibility" below.
 
 A syntax error in a `.punk` file is printed as `file:line:col: message`.
 
@@ -106,11 +106,53 @@ on (`pick : Bool -> I64 -> I64 -> I64` with `pick = fn b -> ...`).
 
 How it works: Roc functions are not curried, so the translator writes partial
 applications as lambdas. It knows the arity of the builtins above and of every
-function defined or annotated in the same file. Arguments of a partial
-application that are not plain values are computed once, before the lambda.
-Calls to functions it knows nothing about (lambda parameters, record fields,
-functions from other modules) pass all arguments at once, as in Roc; partial
-application of those does not work yet. See `examples/punk/currying.punk`.
+function defined or annotated in the same file or in an imported module (see
+below). Arguments of a partial application that are not plain values are
+computed once, before the lambda. Calls to functions it knows nothing about
+(lambda parameters, record fields, modules of URL packages) pass all
+arguments at once, as in Roc; partial application of those does not work.
+See `examples/punk/currying.punk`.
+
+## Roc compatibility (step 4)
+
+punkroc and Roc modules can use each other. When a `.punk` file imports a
+module, the translator reads that module first (`Foo.roc`, or else
+`Foo.punk`, next to the file; `pf.Stdout` in the directory of the platform
+the app header names) and learns its functions and their arity.
+
+**punkroc modules from punkroc.** Their functions can be partially applied
+(`List.map (Math.add 10) xs`), and the `exposing` list counts, as in Elm:
+
+```
+module Math exposing (add, Shape(..), Color)
+```
+
+`Math.square` in another punkroc file is then an error ("Math does not
+expose square"), and so is `Math.Red` (`Color` is exposed without its tags).
+The module itself must define everything it exposes.
+
+**Roc modules from punkroc.** Their functions get the same treatment as List
+and Str: Roc's first argument, the value the function works on, comes last.
+`Text.repeat 3 "ab"` is `Text.repeat("ab", 3)`, so `"ab" |> Text.repeat 3`
+works, and so does partial application. Names are written in camelCase
+(`Text.withPrefix` is `with_prefix`). `import Text exposing [repeat]` works
+the same for the unqualified name. punkroc finds the arity in the module's
+annotations (`repeat : Str, U64 -> Str`) or lambdas (`|s, n| ...`).
+
+**punkroc modules from Roc.** To Roc, a punkroc module is an ordinary type
+module with snake_case names: `Math.sum_of_squares(xs)`. Functions keep the
+argument order they have in punkroc, and curried types are Roc's multi-
+argument functions (`add : I64 -> I64 -> I64` is `Math.add(1, 2)`). Roc does
+not check punkroc's `exposing` list: from Roc, everything is visible.
+
+**What punkroc cannot read.** Modules of packages given by URL are not on
+disk when the translator runs. Their functions take Roc's order and all their
+arguments at once, as in Roc. The switch `rotate_roc_modules` in
+`translate.zig` turns the reordering for Roc modules off.
+
+`examples/punk/imports/` has all three directions: `app.punk` uses the
+punkroc modules `Math` and `Shape`, the Roc module `Text.roc`, and
+`Report.roc`, a Roc module that uses `Math.punk`.
 
 Known gaps: multi-line strings, comments inside expressions (only comments
 before definitions and statements are kept), `::` list patterns, operator

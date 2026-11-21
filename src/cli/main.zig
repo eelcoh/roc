@@ -3222,6 +3222,13 @@ fn finishCompiledRun(
 /// On success, returns the staged app (caller owns it).
 /// Returns null if the file needs no default-platform wiring. Execution
 /// requests report invalid roots here, before any platform or host setup.
+/// Reads a source file as it is on disk, for the punkroc translator, which
+/// looks at the modules a `.punk` file imports.
+fn readRawForPunk(ctx_ptr: ?*anyopaque, allocator: Allocator, path: []const u8) ?[]u8 {
+    const ctx: *CliCtx = @ptrCast(@alignCast(ctx_ptr.?));
+    return std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, path, allocator, .limited(256 * 1024 * 1024)) catch null;
+}
+
 fn stageDefaultApp(
     ctx: *CliCtx,
     file_path: []const u8,
@@ -3238,7 +3245,8 @@ fn stageDefaultApp(
     // punkroc: a `.punk` file is translated to Roc before it is looked at.
     const source = if (punk.isPunkPath(file_path)) blk: {
         defer ctx.gpa.free(raw_source);
-        break :blk punk.toRoc(ctx.gpa, file_path, raw_source) catch |err| switch (err) {
+        const reader: punk.Reader = .{ .ctx = ctx, .read = readRawForPunk };
+        break :blk punk.toRocWith(ctx.gpa, file_path, raw_source, reader) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ParseError => return error.CliError,
         };

@@ -513,3 +513,185 @@ test "currying: a definition gets the arity of its annotation" {
         \\
     );
 }
+
+// Step 4: modules
+
+const mod = @import("mod.zig");
+const interface = @import("interface.zig");
+
+/// A file system in memory, for the translator's reader.
+const Files = struct {
+    entries: []const [2][]const u8,
+
+    fn read(ctx: ?*anyopaque, a: std.mem.Allocator, path: []const u8) ?[]u8 {
+        const fs: *const Files = @ptrCast(@alignCast(ctx.?));
+        for (fs.entries) |entry| {
+            if (std.mem.eql(u8, entry[0], path)) return a.dupe(u8, entry[1]) catch null;
+        }
+        return null;
+    }
+};
+
+const files = Files{ .entries = &.{
+    .{ "app/Math.punk",
+    \\module Math exposing (add, double, Shape(..), Color)
+    \\
+    \\add : I64 -> I64 -> I64
+    \\add = fn a, b -> a + b
+    \\
+    \\double = fn x -> x * 2
+    \\
+    \\secret = fn x -> x
+    \\
+    \\type Shape = Circle F64 | Square F64
+    \\
+    \\type Color = Red | Green
+    },
+    .{ "app/Text.roc",
+    \\Text := [].{
+    \\    ## Repeat a string.
+    \\    repeat : Str, U64 -> Str
+    \\    repeat = |s, n| s
+    \\
+    \\    pad_left = |s, n, c| s
+    \\
+    \\    shout : Str -> Str
+    \\    shout = |s|
+    \\        x : Str
+    \\        x = s
+    \\        x
+    \\
+    \\    greeting : Str
+    \\    greeting = "hi"
+    \\}
+    },
+    .{ "app/../pf/Stdout.roc",
+    \\Stdout := [].{
+    \\    line! : Str => {}
+    \\    write_both! : Str, Str => {}
+    \\}
+    },
+} };
+
+fn checkWith(src: []const u8, expected: []const u8) (punk.Error || error{TestExpectedEqual})!void {
+    const reader = mod.Reader{ .ctx = @constCast(@ptrCast(&files)), .read = Files.read };
+    const out = try mod.toRocWith(std.testing.allocator, "app/main.punk", src, reader);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings(expected, out);
+}
+
+fn checkWithError(src: []const u8, line: u32, msg_part: []const u8) error{ TestExpectedEqual, TestUnexpectedResult }!void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    const resolver = punk.Resolver{ .ctx = @constCast(@ptrCast(&files)), .load = testLoad };
+    if (punk.translateWith(arena.allocator(), src, &diag, resolver)) |out| {
+        std.debug.print("expected an error, got:\n{s}\n", .{out});
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expectEqual(line, diag.line);
+    if (std.mem.find(u8, diag.message, msg_part) == null) {
+        std.debug.print("message was: {s}\n", .{diag.message});
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// The resolver mod.zig builds, for a file in `app/`.
+fn testLoad(ctx: ?*anyopaque, a: std.mem.Allocator, imp: punk.Import) punk.Error!?*const punk.Interface {
+    return mod.loadFrom(.{ .ctx = ctx, .read = Files.read }, "app", a, imp);
+}
+
+test "modules: arity of functions from imported punkroc modules" {
+    try checkWith(
+        \\import Math
+        \\
+        \\inc = Math.add 1
+        \\all = List.map (Math.add 10) [1, 2]
+        \\d = Math.double 4
+    ,
+        \\import Math
+        \\
+        \\inc = |punk_a1| Math.add(1, punk_a1)
+        \\all = List.map([1, 2], |punk_a2| Math.add(10, punk_a2))
+        \\d = Math.double(4)
+        \\
+    );
+}
+
+test "modules: Roc modules take their arguments in Roc's order" {
+    try checkWith(
+        \\app [main!] { pf: platform "../pf/main.roc" }
+        \\
+        \\import pf.Stdout
+        \\import Text
+        \\
+        \\three = Text.repeat 3 "ab"
+        \\threeTimes = Text.repeat 3
+        \\padded = "x" |> Text.padLeft 5 " "
+        \\loud = Text.shout "hey"
+        \\main! = fn () ->
+        \\    Stdout.writeBoth! "a" "b"
+        \\    "hi" |> Stdout.line!
+    ,
+        \\app [main!] { pf: platform "../pf/main.roc" }
+        \\
+        \\import pf.Stdout
+        \\import Text
+        \\
+        \\three = Text.repeat("ab", 3)
+        \\three_times = |punk_a1| Text.repeat(punk_a1, 3)
+        \\padded = Text.pad_left("x", 5, " ")
+        \\loud = Text.shout("hey")
+        \\main! = || {
+        \\    Stdout.write_both!("b", "a")
+        \\    Stdout.line!("hi")
+        \\}
+        \\
+    );
+}
+
+test "modules: names an import exposes unqualified" {
+    try checkWith(
+        \\import Math exposing [add]
+        \\import Text exposing [repeat]
+        \\
+        \\inc = add 1
+        \\r = repeat 2 "x"
+    ,
+        \\import Math exposing [add]
+        \\import Text exposing [repeat]
+        \\
+        \\inc = |punk_a1| add(1, punk_a1)
+        \\r = repeat("x", 2)
+        \\
+    );
+}
+
+test "modules: the exposing list is checked" {
+    try checkWithError("import Math\n\nx = Math.secret 1\n", 3, "Math does not expose secret");
+    try checkWithError("import Math\n\nx = Math.nothing 1\n", 3, "Math has no nothing");
+    try checkWithError("import Math\n\nx = Math.Red\n", 3, "does not expose the tags of Color");
+    try checkWithError("import Math exposing [secret]\n\nx = 1\n", 1, "Math does not expose secret");
+    try checkWithError("module M exposing (foo)\n\nbar = 1\n", 1, "does not define it");
+    try checkWithError("module M exposing (Foo(..))\n\nbar = 1\n", 1, "does not define it");
+    // Exposed tags and Roc modules are fine.
+    try checkWith("import Math\n\nx = Math.Circle 1.0\n", "import Math\n\nx = Math.Circle(1.0)\n");
+    try checkWith("import Text\n\nx = Text.whatever 1\n", "import Text\n\nx = Text.whatever(1)\n");
+}
+
+test "modules: scanning a Roc module" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const iface = try interface.scanRoc(arena.allocator(), files.entries[1][1]);
+    try std.testing.expectEqual(@as(?u8, 2), iface.values.get("repeat").?);
+    try std.testing.expectEqual(@as(?u8, 3), iface.values.get("pad_left").?);
+    try std.testing.expectEqual(@as(?u8, 1), iface.values.get("shout").?);
+    try std.testing.expectEqual(@as(?u8, null), iface.values.get("greeting").?);
+    try std.testing.expect(!iface.values.contains("x"));
+    try std.testing.expectEqual(@as(?u8, 2), interface.typeArity(" List(a), (a -> b) -> List(b)"));
+    try std.testing.expectEqual(@as(?u8, 0), interface.typeArity(" () => {}"));
+    try std.testing.expectEqual(@as(?u8, 1), interface.typeArity(" a -> Str where a.to_str : a -> Str"));
+    try std.testing.expectEqual(@as(?u8, null), interface.typeArity(" { a : I64 -> I64 }"));
+    try std.testing.expectEqual(@as(?u8, 0), interface.lambdaArity("|| 1"));
+    try std.testing.expectEqual(@as(?u8, 2), interface.lambdaArity("|{ a, b }, c| a"));
+}

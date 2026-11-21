@@ -9,12 +9,46 @@
 //! - functions are curried: `add 1` is a function when `add` takes two
 //!   arguments. The emitter knows the arity of every function defined in the
 //!   file and of the builtins, and writes partial applications as lambdas.
-//!   Functions it knows nothing about (lambda parameters, other modules) are
+//!   Functions it knows nothing about (lambda parameters, record fields) are
 //!   called with all their arguments at once, as in Roc.
+//!
+//! Step 4 adds the boundary with other modules: with a `Resolver`, the
+//! translator reads the interface of every imported module (see
+//! interface.zig), so it knows the arity of their functions, gives functions
+//! of Roc modules their arguments in Roc's order, and checks what punkroc
+//! modules expose.
 
 const std = @import("std");
 const stdlib = @import("stdlib.zig");
+const interface = @import("interface.zig");
 const Allocator = std.mem.Allocator;
+
+pub const Interface = interface.Interface;
+
+/// Whether punkroc passes the arguments of functions from Roc modules in
+/// its own order, the value they work on last, as it does for List and Str:
+/// `Json.decode fmt bytes` is `Json.decode(bytes, fmt)`.
+pub const rotate_roc_modules = true;
+
+/// A module named by an `import` line.
+pub const Import = struct {
+    /// The package alias (`pf` in `import pf.Stdout`), if any.
+    package: ?[]const u8,
+    /// Where the app header says that package lives (`"../platform/main.roc"`),
+    /// as written, without quotes.
+    package_path: ?[]const u8,
+    /// The module name (`Stdout`).
+    module: []const u8,
+};
+
+/// Finds the interfaces of imported modules for the translator.
+pub const Resolver = struct {
+    ctx: ?*anyopaque,
+    /// The interface of an imported module, allocated in `arena`, or null
+    /// when it cannot be found (a package that is not on disk). Functions of
+    /// unknown modules are called as in Roc: all arguments, Roc's order.
+    load: *const fn (ctx: ?*anyopaque, arena: Allocator, imp: Import) Error!?*const Interface,
+};
 
 /// Where and why translation failed.
 pub const Diagnostic = struct {
@@ -29,12 +63,29 @@ pub const Error = error{ ParseError, OutOfMemory };
 /// Translate a whole `.punk` module to Roc source text.
 /// On `error.ParseError`, `diag` describes the problem.
 pub fn translate(arena: Allocator, src: []const u8, diag: *Diagnostic) Error![]const u8 {
+    return translateWith(arena, src, diag, null);
+}
+
+/// Like `translate`, but the interfaces of imported modules come from
+/// `resolver` (see `Resolver`).
+pub fn translateWith(arena: Allocator, src: []const u8, diag: *Diagnostic, resolver: ?Resolver) Error![]const u8 {
     const toks = try lex(arena, src, diag);
     var p = Parser{ .a = arena, .src = src, .toks = toks, .diag = diag };
     const items = try p.parseModule();
-    var e = Emitter{ .a = arena, .diag = diag };
+    var e = Emitter{ .a = arena, .diag = diag, .src = src, .resolver = resolver };
     try e.emitModule(items);
     return e.buf.items;
+}
+
+/// The interface of a punkroc module: its functions with their arity, its
+/// types with their tags, and its `exposing` list.
+pub fn punkInterface(arena: Allocator, src: []const u8, diag: *Diagnostic) Error!Interface {
+    const toks = try lex(arena, src, diag);
+    var p = Parser{ .a = arena, .src = src, .toks = toks, .diag = diag };
+    const items = try p.parseModule();
+    var e = Emitter{ .a = arena, .diag = diag, .src = src };
+    try e.bindItems(items);
+    return e.interfaceOf(items);
 }
 
 // Lexer
@@ -1409,8 +1460,15 @@ const Emitter = struct {
     scope: std.ArrayList(Binding) = .empty,
     /// Counter for the names of generated lambda parameters.
     fresh: u32 = 0,
+    /// The source, to point at names in error messages.
+    src: []const u8 = "",
+    resolver: ?Resolver = null,
+    /// Imported modules punkroc could read, by the name the file uses for them.
+    modules: std.StringHashMapUnmanaged(*const Interface) = .empty,
 
-    const Binding = struct { name: []const u8, arity: ?u8, anno: bool = false };
+    /// `order` is not `.none` for names imported unqualified from a Roc
+    /// module (`import Json exposing [decode]`).
+    const Binding = struct { name: []const u8, arity: ?u8, anno: bool = false, order: stdlib.Order = .none };
 
     fn w(e: *Emitter, s: []const u8) Error!void {
         try e.buf.appendSlice(e.a, s);
@@ -1434,7 +1492,9 @@ const Emitter = struct {
     /// definitions inside the block. When the module declares `type Name`,
     /// that type carries the block.
     fn emitModule(e: *Emitter, items: []Item) Error!void {
+        try e.loadImports(items);
         try e.bindItems(items);
+        if (moduleHeaderName(items) != null) _ = try e.interfaceOf(items);
         const module_name = moduleHeaderName(items) orelse {
             try e.emitItems(items);
             try e.w("\n");
@@ -1644,6 +1704,7 @@ const Emitter = struct {
     }
 
     fn emitIdent(e: *Emitter, raw: []const u8) Error!void {
+        try e.checkExposed(raw);
         const name = stdlib.rocName(try snakeQualified(e.a, raw));
         if (e.isVar(name)) try e.w("$");
         try e.w(name);
@@ -1731,6 +1792,195 @@ const Emitter = struct {
         try e.emitBody(&block);
     }
 
+    /// Reads the interfaces of the imported modules, and binds the names an
+    /// import exposes unqualified (`import Math exposing [double]`).
+    fn loadImports(e: *Emitter, items: []const Item) Error!void {
+        const resolver = e.resolver orelse return;
+        var packages: []const Package = &.{};
+        for (items) |item| if (item.kind == .raw and std.mem.startsWith(u8, item.kind.raw, "app")) {
+            packages = try appPackages(e.a, item.kind.raw);
+        };
+        for (items) |item| {
+            if (item.kind != .raw) continue;
+            const imp = parseImport(item.kind.raw) orelse continue;
+            var package_path: ?[]const u8 = null;
+            if (imp.package) |pkg| for (packages) |known| {
+                if (std.mem.eql(u8, known.alias, pkg)) package_path = known.path;
+            };
+            const iface = try resolver.load(resolver.ctx, e.a, .{ .package = imp.package, .package_path = package_path, .module = imp.module }) orelse continue;
+            try e.modules.put(e.a, imp.alias, iface);
+            const list = imp.exposing orelse continue;
+            var names = std.mem.tokenizeAny(u8, list, ", \t\r\n");
+            while (names.next()) |raw| {
+                if (!std.ascii.isLower(raw[0]) and raw[0] != '_') continue;
+                const qualified = try std.fmt.allocPrint(e.a, "{s}.{s}", .{ imp.alias, raw });
+                try e.checkExposedAt(qualified, raw);
+                const name = try snake(e.a, raw);
+                const arity = iface.values.get(name) orelse null;
+                try e.scope.append(e.a, .{
+                    .name = name,
+                    .arity = arity,
+                    .order = if (arity) |n| boundaryOrder(iface.kind, n) else .none,
+                });
+            }
+        }
+    }
+
+    const Package = struct { alias: []const u8, path: []const u8 };
+
+    /// The packages of an app header: `{ pf: platform "../pf/main.roc", json: "https://..." }`.
+    fn appPackages(a: Allocator, raw: []const u8) Error![]const Package {
+        var out: std.ArrayList(Package) = .empty;
+        const open = std.mem.findScalar(u8, raw, '{') orelse return out.items;
+        var i = open + 1;
+        while (i < raw.len) {
+            // alias
+            while (i < raw.len and !std.ascii.isLower(raw[i])) : (i += 1) {
+                if (raw[i] == '}') return out.items;
+            }
+            const start = i;
+            while (i < raw.len and (std.ascii.isAlphanumeric(raw[i]) or raw[i] == '_')) i += 1;
+            const alias = raw[start..i];
+            while (i < raw.len and (raw[i] == ' ' or raw[i] == '\t')) i += 1;
+            if (i >= raw.len or raw[i] != ':') continue;
+            const q1 = std.mem.findScalarPos(u8, raw, i, '"') orelse return out.items;
+            const q2 = std.mem.findScalarPos(u8, raw, q1 + 1, '"') orelse return out.items;
+            try out.append(a, .{ .alias = alias, .path = raw[q1 + 1 .. q2] });
+            i = q2 + 1;
+        }
+        return out.items;
+    }
+
+    const ParsedImport = struct {
+        package: ?[]const u8,
+        module: []const u8,
+        /// The name the file uses for the module (`as` or the module name).
+        alias: []const u8,
+        /// The names between the brackets of `exposing [..]`, if any.
+        exposing: ?[]const u8,
+    };
+
+    /// `import pf.Stdout`, `import Math as M exposing [double]`.
+    fn parseImport(raw: []const u8) ?ParsedImport {
+        if (!std.mem.startsWith(u8, raw, "import ")) return null;
+        var rest = std.mem.trimStart(u8, raw["import ".len..], " \t");
+        const path_end = std.mem.findAny(u8, rest, " \t\r\n") orelse rest.len;
+        const path = rest[0..path_end];
+        if (path.len == 0) return null;
+        rest = rest[path_end..];
+        var package: ?[]const u8 = null;
+        var module = path;
+        if (std.ascii.isLower(path[0])) {
+            const dot = std.mem.findScalar(u8, path, '.') orelse return null;
+            package = path[0..dot];
+            module = path[dot + 1 ..];
+        }
+        var alias = module;
+        var words = std.mem.tokenizeAny(u8, rest, " \t\r\n");
+        if (words.next()) |w1| if (std.mem.eql(u8, w1, "as")) {
+            if (words.next()) |name| alias = name;
+        };
+        var exposing: ?[]const u8 = null;
+        if (std.mem.find(u8, rest, "exposing")) |at| {
+            const open = std.mem.findAnyPos(u8, rest, at, "[(") orelse return null;
+            const close = std.mem.findAnyPos(u8, rest, open, "])") orelse rest.len;
+            exposing = rest[open + 1 .. close];
+        }
+        return .{ .package = package, .module = module, .alias = alias, .exposing = exposing };
+    }
+
+    /// The interface of this module (functions, types, exposing list), after
+    /// `bindItems`. Checks that the exposing list names things the module
+    /// defines.
+    fn interfaceOf(e: *Emitter, items: []const Item) Error!Interface {
+        var iface: Interface = .{ .kind = .punk };
+        for (items) |item| switch (item.kind) {
+            .def => |d| if (d.pat.* == .ident) {
+                const name = try snake(e.a, d.pat.ident);
+                try iface.values.put(e.a, name, e.lookup(name));
+            },
+            .anno => |an| {
+                const name = try snake(e.a, an.name);
+                if (!iface.values.contains(name)) try iface.values.put(e.a, name, e.lookup(name));
+            },
+            .type_nominal => |tn| {
+                var tags: std.ArrayList([]const u8) = .empty;
+                for (tn.alts) |alt| switch (alt.*) {
+                    .name => |n| try tags.append(e.a, n),
+                    .app => |app| try tags.append(e.a, app.head),
+                    .func, .record, .tuple, .unit, .union_, .paren => {},
+                };
+                try iface.types.put(e.a, tn.name, tags.items);
+            },
+            .type_alias => |ta| try iface.types.put(e.a, ta.name, &.{}),
+            .raw, .expect => {},
+        };
+        if (items.len == 0 or items[0].kind != .raw) return iface;
+        const header = items[0].kind.raw;
+        if (!std.mem.startsWith(u8, header, "module ")) return iface;
+        const at = std.mem.find(u8, header, "exposing") orelse return iface;
+        const open = std.mem.findScalarPos(u8, header, at, '(') orelse return iface;
+        const close = std.mem.findScalarLast(u8, header, ')') orelse return iface;
+        if (close <= open) return iface;
+        const list = header[open + 1 .. close];
+        iface.exposing = try interface.parseExposing(e.a, list, snake);
+        if (iface.exposing) |ex| for (ex.items.items) |raw| {
+            const name = if (std.ascii.isUpper(raw[0])) raw[0 .. std.mem.findScalar(u8, raw, '(') orelse raw.len] else try snake(e.a, raw);
+            const known = if (std.ascii.isUpper(raw[0])) iface.types.contains(std.mem.trimEnd(u8, name, " ")) else iface.values.contains(name);
+            if (!known) return e.errAtText(raw, try std.fmt.allocPrint(e.a, "the module exposes '{s}', but does not define it", .{raw}));
+        };
+        return iface;
+    }
+
+    /// A qualified name of a punkroc module that it does not expose is an
+    /// error, as in Elm. Names of Roc modules are left to the Roc compiler.
+    fn checkExposed(e: *Emitter, raw: []const u8) Error!void {
+        return e.checkExposedAt(raw, raw);
+    }
+
+    fn checkExposedAt(e: *Emitter, raw: []const u8, at: []const u8) Error!void {
+        const dot = std.mem.findScalarLast(u8, raw, '.') orelse return;
+        const iface = e.modules.get(raw[0..dot]) orelse return;
+        if (iface.kind != .punk) return;
+        const module = raw[0..dot];
+        const member = raw[dot + 1 ..];
+        if (member.len == 0) return;
+        if (std.ascii.isUpper(member[0])) {
+            if (iface.exposesUpper(member)) return;
+            const msg = if (iface.tagType(member)) |ty|
+                try std.fmt.allocPrint(e.a, "{s} does not expose the tags of {s}: write {s}(..) in its exposing list", .{ module, ty, ty })
+            else
+                try std.fmt.allocPrint(e.a, "{s} does not expose {s}", .{ module, member });
+            return e.errAtText(at, msg);
+        }
+        const name = try snake(e.a, member);
+        if (!iface.values.contains(name)) {
+            return e.errAtText(at, try std.fmt.allocPrint(e.a, "{s} has no {s}", .{ module, member }));
+        }
+        if (!iface.exposesValue(name)) {
+            return e.errAtText(at, try std.fmt.allocPrint(e.a, "{s} does not expose {s}", .{ module, member }));
+        }
+    }
+
+    /// An error at `text` when it is a slice of the source.
+    fn errAtText(e: *Emitter, text: []const u8, message: []const u8) Error {
+        const base = @intFromPtr(e.src.ptr);
+        const at = @intFromPtr(text.ptr);
+        if (at >= base and at <= base + e.src.len) {
+            const off = at - base;
+            var line: u32 = 1;
+            var col: u32 = 1;
+            for (e.src[0..off]) |c| {
+                if (c == '\n') {
+                    line += 1;
+                    col = 1;
+                } else col += 1;
+            }
+            return fail(e.diag, line, col, message);
+        }
+        return e.errAt0(message);
+    }
+
     fn errAt0(e: *Emitter, message: []const u8) Error {
         e.diag.message = message;
         return error.ParseError;
@@ -1756,12 +2006,27 @@ const Emitter = struct {
     }
 
     fn lookup(e: *Emitter, name: []const u8) ?u8 {
+        const b = e.lookupBinding(name) orelse return null;
+        return b.arity;
+    }
+
+    fn lookupBinding(e: *Emitter, name: []const u8) ?Binding {
         var i = e.scope.items.len;
         while (i > 0) {
             i -= 1;
-            if (std.mem.eql(u8, e.scope.items[i].name, name)) return e.scope.items[i].arity;
+            if (std.mem.eql(u8, e.scope.items[i].name, name)) return e.scope.items[i];
         }
         return null;
+    }
+
+    /// The argument order of a function from another module: punkroc
+    /// modules already take their arguments in punkroc's order; Roc modules
+    /// take the value they work on first, so it moves to the end.
+    fn boundaryOrder(kind: interface.Kind, arity: u8) stdlib.Order {
+        return switch (kind) {
+            .punk => .none,
+            .roc => if (rotate_roc_modules and arity >= 2) .rotate else .none,
+        };
     }
 
     const Callee = struct { f: stdlib.Fn, builtin: bool };
@@ -1771,12 +2036,18 @@ const Emitter = struct {
         switch (x.*) {
             .ident => |raw| {
                 const name = stdlib.rocName(try snakeQualified(e.a, raw));
-                if (std.mem.findScalar(u8, name, '.') != null) {
+                if (std.mem.findScalarLast(u8, name, '.')) |dot| {
+                    if (e.modules.get(name[0..dot])) |iface| {
+                        const n = (iface.values.get(name[dot + 1 ..]) orelse return null) orelse return null;
+                        const order = boundaryOrder(iface.kind, n);
+                        return .{ .f = .{ .arity = n, .order = order }, .builtin = order != .none };
+                    }
                     const f = stdlib.lookup(name) orelse return null;
                     return .{ .f = f, .builtin = true };
                 }
-                const n = e.lookup(name) orelse return null;
-                return .{ .f = .{ .arity = n, .order = .none }, .builtin = false };
+                const b = e.lookupBinding(name) orelse return null;
+                const n = b.arity orelse return null;
+                return .{ .f = .{ .arity = n, .order = b.order }, .builtin = b.order != .none };
             },
             .paren => |inner| return e.calleeArity(inner),
             .ident_raw, .upper, .literal, .string, .unit, .underscore, .field, .app, .binop, .neg, .not, .try_, .lambda, .if_, .case, .list, .tuple, .record, .kw => return null,
@@ -2016,7 +2287,11 @@ const Emitter = struct {
                 }
                 try e.emitIdent(name);
             },
-            .ident_raw, .upper, .literal => |s| try e.w(s),
+            .upper => |s| {
+                try e.checkExposed(s);
+                try e.w(s);
+            },
+            .ident_raw, .literal => |s| try e.w(s),
             .string => |s| try e.emitString(s),
             .unit => try e.w("{}"),
             .underscore => try e.w("_"),
@@ -2203,6 +2478,7 @@ const Emitter = struct {
             .ident => |name| try e.emitIdent(name),
             .underscore => |name| try e.w(try snake(e.a, name)),
             .tag => |t| {
+                try e.checkExposed(t.name);
                 try e.w(t.name);
                 if (t.args.len > 0) {
                     try e.w("(");
