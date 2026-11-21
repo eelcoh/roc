@@ -526,9 +526,19 @@ const Files = struct {
     fn read(ctx: ?*anyopaque, a: std.mem.Allocator, path: []const u8) ?[]u8 {
         const fs: *const Files = @ptrCast(@alignCast(ctx.?));
         for (fs.entries) |entry| {
-            if (std.mem.eql(u8, entry[0], path)) return a.dupe(u8, entry[1]) catch null;
+            if (samePath(entry[0], path)) return a.dupe(u8, entry[1]) catch null;
         }
         return null;
+    }
+
+    /// Paths are joined with `\\` on Windows; the entries use `/`.
+    fn samePath(entry: []const u8, path: []const u8) bool {
+        if (entry.len != path.len) return false;
+        for (entry, path) |e, p| {
+            const same = e == p or (e == '/' and std.fs.path.isSep(p));
+            if (!same) return false;
+        }
+        return true;
     }
 };
 
