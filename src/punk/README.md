@@ -58,7 +58,7 @@ Try the translator on its own, without building the rest of the compiler:
 ```
 zig test src/punk/test.zig
 zig build-exe src/punk/main.zig -femit-bin=punk2roc
-./punk2roc examples/punk/aoc_day2.punk
+./punk2roc examples/punk/aoc_day2_functional.punk
 ```
 
 ## Currying and data-last pipes (step 3)
@@ -116,6 +116,32 @@ computed once, before the lambda. Calls to functions it knows nothing about
 (lambda parameters, record fields, modules of URL packages) pass all
 arguments at once, as in Roc; partial application of those does not work.
 See `examples/punk/currying.punk`.
+
+## Folds instead of loops
+
+punkroc has no `var`, `for`, `while` or `return`. A loop is a `fold`, a
+keyword whose parts have names, so there is no argument order to remember:
+
+```
+fold xs into 0 with fn x, total -> total + x     List.fold(xs, 0, |total, x| total + x)
+xs |> fold into 0 with add                       (the list comes from the pipe)
+```
+
+The block form names the accumulators in its header and has the body below:
+
+```
+fold x in xs into total = 0
+    total + x
+
+fold (i, x) in List.mapWithIndex (fn x, i -> (i, x)) xs into bestI = 0, bestX = 0
+    if x > bestX then { bestI = i, bestX = x } else {}
+```
+
+With one accumulator the body gives its new value. With more, the body gives a
+record with only the accumulators that change (`{}` when none does), like
+Elm's `{ s | ... }` without the `s |`, and the fold's value is the record with
+all of them. Both forms become `List.fold`. Effects in `main!` stay as they
+are: one line per `!` call.
 
 ## Roc compatibility (step 4)
 

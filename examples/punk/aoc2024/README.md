@@ -18,4 +18,4 @@ zig-out/bin/roc examples/punk/aoc2024/Day06.punk
 | 5   | 143, 123          | `Set`, `List.sortWith`, Elm-style order tags |
 | 6   | 41, 6             | own union type with `==`, record update, loop detection |
 | 7   | 3749, 11387       | `type Op`, recursion with early stop |
-| 11  | 55312, 65601038650482 | `Dict` of counts, `List.fold` |
+| 11  | 55312, 65601038650482 | `Dict` of counts, `fold ... into ... with` |

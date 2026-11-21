@@ -29,7 +29,7 @@ blink = fn stones ->
     stones
         |> Dict.toList
         |> List.joinMap (fn (stone, count) -> List.map (fn s -> (s, count)) (change stone))
-        |> List.fold addCount Dict.empty
+        |> fold into Dict.empty with addCount
 
 addCount : (U64, U64) -> Counts -> Counts
 addCount = fn (stone, count), counts ->

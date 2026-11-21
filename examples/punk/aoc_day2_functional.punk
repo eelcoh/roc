@@ -3,7 +3,7 @@ app [main!] { pf: platform "../../test/fx/platform/main.roc" }
 import pf.Stdout
 
 {-| Advent of Code 2025, day 2, in a functional punkroc style.
-Same answers as aoc_day2.punk, without var, for or while.
+Same answers as test/fx/aoc_day2.roc, without var, for or while.
 
 Builtins take the value they work on last, as in Elm, so `|>` and
 partial application (`invalidIds divisorsFor`) fit together.

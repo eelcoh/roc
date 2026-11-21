@@ -1,0 +1,68 @@
+app [main!] { pf: platform "../../test/fx/platform/main.roc" }
+
+import pf.Stdout
+
+{-| Folds without loops: the `fold` keyword, inline and as a block.
+See src/punk/README.md, "Folds instead of loops".
+-}
+
+type Instr
+    = Mul U64 U64
+    | Do
+    | Dont
+
+main! = fn () ->
+    numbers = [3, 9, 4, 9, 1]
+    Stdout.line! "som: ${U64.toStr (som numbers)}"
+    Stdout.line! "som (blok): ${U64.toStr (somBlok numbers)}"
+    best = maxIndex numbers
+    Stdout.line! "max: ${U64.toStr best.bestX} op index ${U64.toStr best.bestI}"
+    instrs = [Mul 2 4, Dont, Mul 5 5, Mul 11 8, Do, Mul 8 5]
+    Stdout.line! "aan/uit: ${U64.toStr (run instrs)}"
+    Stdout.line! "met step: ${U64.toStr (runStep instrs)}"
+    Stdout.line! "gemiddelde: ${U64.toStr (gemiddelde numbers)}"
+
+som : List U64 -> U64
+som = fn xs ->
+    fold xs into 0 with fn x, total -> total + x
+
+somBlok : List U64 -> U64
+somBlok = fn xs ->
+    fold x in xs into total = 0
+        total + x
+
+-- The first one wins when two are equal
+maxIndex = fn xs ->
+    fold (i, x) in List.mapWithIndex (fn x, i -> (i, x)) xs into bestI = 0, bestX = 0
+        if x > bestX then { bestI = i, bestX = x } else {}
+
+-- AoC 2024 day 3, part 2: only a Mul after a Do counts
+run : List Instr -> U64
+run = fn instrs ->
+    result =
+        fold instr in instrs into on = True, total = 0
+            case instr of
+                Do -> { on = True }
+                Dont -> { on = False }
+                Mul a b -> if on then { total = total + a * b } else {}
+    result.total
+
+-- The same with a named step, as in Elm's `update msg model`
+runStep : List Instr -> U64
+runStep = fn instrs ->
+    instrs
+        |> fold into { on = True, total = 0 } with step
+        |> .total
+
+step = fn instr, s ->
+    case instr of
+        Do -> { s | on = True }
+        Dont -> { s | on = False }
+        Mul a b -> if s.on then { s | total = s.total + a * b } else s
+
+gemiddelde : List U64 -> U64
+gemiddelde = fn xs ->
+    s =
+        fold x in xs into total = 0, count = 0
+            { total = total + x, count = count + 1 }
+    s.total // s.count
