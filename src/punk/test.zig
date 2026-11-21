@@ -1293,3 +1293,161 @@ test "fmt: same-ignoring-space" {
     try std.testing.expect(!format.sameIgnoringSpace("ab", "a b"));
     try std.testing.expect(!format.sameIgnoringSpace("a", "a b"));
 }
+
+const query_head =
+    \\app [main!] { pf: platform "p.roc" }
+    \\
+    \\import pf.Db
+    \\
+    \\type alias Link =
+    \\    { id : Str
+    \\    , url : Str
+    \\    , created : Int
+    \\    , note : Maybe Str
+    \\    }
+    \\
+    \\table links : Link
+    \\    key id
+    \\    read everyone
+    \\    insert everyone
+    \\    update everyone
+    \\    delete nobody
+    \\
+    \\
+;
+
+/// The Roc a query on `query_head`'s table translates to (the line of the
+/// definition `q`), without the head.
+fn checkQuery(comptime src: []const u8, expected: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    const out = punk.translate(arena.allocator(), query_head ++ src, &diag) catch |err| {
+        std.debug.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.col, diag.message });
+        return err;
+    };
+    const start = std.mem.find(u8, out, "# table links : Link\n\n").? + "# table links : Link\n\n".len;
+    try std.testing.expectEqualStrings(expected, out[start..]);
+}
+
+test "queries: a pipeline from a table is one SQL statement" {
+    // The whole row, the first one: a decoder for every column.
+    try checkQuery("q = fn id -> links |> Db.filter (fn link -> link.id == id) |> Db.first\n",
+        \\q = |id| Db.first_row([Db.param_text(id)], "SELECT id, url, created, note FROM links WHERE id = $1 LIMIT 1", Db.field(Db.read_text, "id", |punk_c1| Db.field(Db.read_text, "url", |punk_c2| Db.field(Db.read_int, "created", |punk_c3| Db.field(Db.read_nullable(Db.read_text), "note", |punk_c4| Db.done({ id: punk_c1, url: punk_c2, created: punk_c3, note: punk_c4 }))))))
+        \\
+    );
+    // One column; values from outside the query are parameters, typed by
+    // the column they meet; Nothing is NULL; filters are joined with AND.
+    try checkQuery(
+        \\q = fn cutoff ->
+        \\    links
+        \\        |> Db.filter (fn link -> link.created < cutoff + 5 && (link.note == Nothing || link.url /= "x"))
+        \\        |> Db.filter (fn link -> not (link.note /= Nothing))
+        \\        |> Db.map .url
+        \\        |> Db.all
+        \\
+    ,
+        \\q = |cutoff| Db.all_rows([Db.param_int(cutoff + 5), Db.param_text("x")], "SELECT url FROM links WHERE created < $1 AND (note IS NULL OR url <> $2) AND NOT (note IS NOT NULL)", Db.field(Db.read_text, "url", Db.done))
+        \\
+    );
+    // A record of values, with SQL expressions.
+    try checkQuery("q = links |> Db.map (fn l -> { url = l.url, later = l.created * 2 }) |> Db.all\n",
+        \\q = Db.all_rows([Db.param_int(2)], "SELECT url, created * $1 AS later FROM links", Db.field(Db.read_text, "url", |punk_c1| Db.field(Db.read_int, "later", |punk_c2| Db.done({ url: punk_c1, later: punk_c2 }))))
+        \\
+    );
+    // A Maybe column compared with a value.
+    try checkQuery("q = fn n -> links |> Db.filter (fn l -> l.note == n) |> Db.all\n",
+        \\q = |n| Db.all_rows([Db.param_nullable(n, Db.param_text)], "SELECT id, url, created, note FROM links WHERE note IS NOT DISTINCT FROM $1", Db.field(Db.read_text, "id", |punk_c1| Db.field(Db.read_text, "url", |punk_c2| Db.field(Db.read_int, "created", |punk_c3| Db.field(Db.read_nullable(Db.read_text), "note", |punk_c4| Db.done({ id: punk_c1, url: punk_c2, created: punk_c3, note: punk_c4 }))))))
+        \\
+    );
+}
+
+test "queries: insert and update" {
+    // A record written in the query: a parameter per column.
+    try checkQuery("q = fn id, url -> Db.insert { id, url, created = 5, note = Nothing } links\n",
+        \\q = |id, url| Db.changes([Db.param_text(id), Db.param_text(url), Db.param_int(5), Db.param_nullable(Nothing, Db.param_text)], "INSERT INTO links (id, url, created, note) VALUES ($1, $2, $3, $4)")
+        \\
+    );
+    // Any other row is computed once.
+    try checkQuery("q = fn link -> Db.insertIfNew link links\n",
+        \\q = |link| {
+        \\    punk_row1 = link
+        \\    Db.changes([Db.param_text(punk_row1.id), Db.param_text(punk_row1.url), Db.param_int(punk_row1.created), Db.param_nullable(punk_row1.note, Db.param_text)], "INSERT INTO links (id, url, created, note) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING")
+        \\}
+        \\
+    );
+    try checkQuery("q = fn id, url -> links |> Db.filter (fn l -> l.id == id) |> Db.update (fn l -> { l | url = url, created = l.created + 1 })\n",
+        \\q = |id, url| Db.changes([Db.param_text(url), Db.param_int(1), Db.param_text(id)], "UPDATE links SET url = $1, created = created + $2 WHERE id = $3")
+        \\
+    );
+}
+
+test "queries: keywords as names, and the schema" {
+    const src =
+        \\app [main!] { pf: platform "p.roc" }
+        \\
+        \\import pf.Db as Q
+        \\
+        \\type alias Order =
+        \\    { orderId : Int
+        \\    , user : Str
+        \\    , total : Float
+        \\    , paid : Bool
+        \\    , memo : Maybe Str
+        \\    }
+        \\
+        \\table order : Order
+        \\    key orderId
+        \\    read everyone
+        \\    insert nobody
+        \\    update nobody
+        \\    delete everyone
+        \\
+        \\q = fn u -> order |> Q.filter (fn o -> o.user == u && o.paid) |> Q.delete
+        \\
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    const out = try punk.translate(arena.allocator(), src, &diag);
+    try std.testing.expect(std.mem.find(u8, out, "q = |u| Q.changes([Q.param_text(u)], \"DELETE FROM \\\"order\\\" WHERE \\\"user\\\" = $1 AND paid\")") != null);
+    try std.testing.expectEqualStrings(
+        \\-- Made by `punk check --schema` from the tables of the program. Until punk
+        \\-- has verified migrations (roadmap B2), a change to a table is a change you
+        \\-- also make to the database by hand.
+        \\
+        \\CREATE TABLE IF NOT EXISTS "order" (
+        \\    order_id bigint PRIMARY KEY,
+        \\    "user" text NOT NULL,
+        \\    total double precision NOT NULL,
+        \\    paid boolean NOT NULL,
+        \\    memo text
+        \\);
+        \\
+    , try punk.schema(arena.allocator(), src, &diag));
+}
+
+test "rules: tables and queries (P401..P404)" {
+    // P401: a table needs a record type it can store, and a whole policy.
+    try checkRule("app [main!] { pf: platform \"p.roc\" }\n\ntable links : Link\n    read everyone\n", 3, 15, .table_decl);
+    try checkRule("app [main!] { pf: platform \"p.roc\" }\n\ntype alias L =\n    { id : Str }\n\ntable ls : L\n    read everyone\n", 6, 7, .table_decl);
+    try checkRule("app [main!] { pf: platform \"p.roc\" }\n\ntype alias L =\n    { id : List Str }\n\ntable ls : L\n    read everyone\n", 4, 7, .table_decl);
+    try checkRule("app [main!] { pf: platform \"p.roc\" }\n\ntype alias L =\n    { id : Str }\n\ntable ls : L\n    key name\n", 7, 9, .table_decl);
+    try checkRule("app [main!] { pf: platform \"p.roc\" }\n\ntype alias L =\n    { id : Str }\n\ntable ls : L\n    read somebody\n", 7, 10, .table_decl);
+    // P402: what can't run in the database.
+    try checkRule(query_head ++ "q = links |> Db.filter (fn l -> String.startsWith \"x\" l.url) |> Db.all\n", 19, 33, .not_in_database);
+    try checkRule(query_head ++ "q = fn f -> links |> Db.filter f |> Db.all\n", 19, 32, .not_in_database);
+    try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.id == \"x\")\n", 19, 14, .not_in_database);
+    try checkRule(query_head ++ "q = links\n", 19, 5, .not_in_database);
+    try checkRule(query_head ++ "q = links |> Db.map .url |> Db.filter (fn u -> u == \"x\") |> Db.all\n", 19, 14, .not_in_database);
+    try checkRule(query_head ++ "q = Db.all\n", 19, 5, .not_in_database);
+    // P403: columns the table has, values of their type.
+    try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.name == \"x\") |> Db.all\n", 19, 35, .query_type);
+    try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.created == \"x\") |> Db.all\n", 19, 46, .query_type);
+    try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.url) |> Db.all\n", 19, 28, .query_type);
+    try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.url == Nothing) |> Db.all\n", 19, 42, .query_type);
+    try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.note < \"x\") |> Db.all\n", 19, 40, .query_type);
+    try checkRule(query_head ++ "q = fn id -> Db.insert { id } links\n", 19, 14, .query_type);
+    // P404: what the policy forbids.
+    try checkRule(query_head ++ "q = links |> Db.delete\n", 19, 14, .not_allowed);
+}

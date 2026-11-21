@@ -24,6 +24,7 @@ const interface = @import("interface.zig");
 const elm = @import("elm.zig");
 const numbers = @import("numbers.zig");
 const rules = @import("rules.zig");
+const query = @import("query.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Interface = interface.Interface;
@@ -137,6 +138,19 @@ pub fn sourceSpan(marks: []const Mark, start: u32, end: u32) struct { start: u32
 
 /// The interface of a punkroc module: its functions with their arity, its
 /// types with their tags, and its `exposing` list.
+/// The `CREATE TABLE` statements for the tables a `.punk` module declares
+/// (`punk check --schema`), in the order it declares them.
+pub fn schema(arena: Allocator, src: []const u8, diag: *Diagnostic) Error![]const u8 {
+    const toks = try lex(arena, src, diag);
+    var p = Parser{ .a = arena, .src = src, .toks = toks, .diag = diag };
+    const items = try p.parseModule();
+    var e = Emitter{ .a = arena, .diag = diag, .src = src };
+    try query.resolveTables(&e, items);
+    var tables: std.ArrayList(*const query.Table) = .empty;
+    for (items) |item| if (item.kind == .table) try tables.append(arena, e.tables.get(item.kind.table.name).?);
+    return query.schemaSql(arena, tables.items);
+}
+
 pub fn punkInterface(arena: Allocator, src: []const u8, diag: *Diagnostic) Error!Interface {
     const toks = try lex(arena, src, diag);
     var p = Parser{ .a = arena, .src = src, .toks = toks, .diag = diag };
@@ -679,13 +693,15 @@ pub const Item = struct {
         type_alias: struct { name: []const u8, params: [][]const u8, ty: *Type },
         type_nominal: struct { name: []const u8, params: [][]const u8, alts: []*Type },
         expect: *Block,
+        /// `table links : Link` with its key and policy (query.zig).
+        table: query.TableDecl,
     },
     trailing_comments: []const []const u8 = &.{},
 };
 
 // Parser
 
-const Parser = struct {
+pub const Parser = struct {
     a: Allocator,
     src: []const u8,
     toks: []Token,
@@ -809,10 +825,13 @@ const Parser = struct {
                 _ = p.advance();
                 return .{ .expect = try p.parseTest() };
             },
-            .lower => if (p.peekAt(1).tag == .colon) {
-                _ = p.advance();
-                _ = p.advance();
-                return .{ .anno = .{ .name = t.text, .ty = try p.parseType() } };
+            .lower => {
+                if (std.mem.eql(u8, t.text, "table") and p.peekAt(1).tag == .lower and p.peekAt(2).tag == .colon) return p.parseTable();
+                if (p.peekAt(1).tag == .colon) {
+                    _ = p.advance();
+                    _ = p.advance();
+                    return .{ .anno = .{ .name = t.text, .ty = try p.parseType() } };
+                }
             },
             .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_as, .eof => {},
         }
@@ -820,6 +839,29 @@ const Parser = struct {
         _ = try p.expect(.equals, "'=' in a definition");
         const pat = try p.exprToPattern(lhs, t);
         return .{ .def = .{ .pat = pat, .body = try p.parseBody() } };
+    }
+
+    /// `table links : Link` and, indented below it, one line each for its
+    /// key and who may read, insert, update and delete (query.zig).
+    fn parseTable(p: *Parser) Error!@FieldType(Item, "kind") {
+        _ = p.advance(); // table
+        const name = p.advance().text;
+        _ = p.advance(); // :
+        const row_type = (try p.expect(.upper, "the type of the table's rows, as in 'table links : Link'")).text;
+        var lines: std.ArrayList(query.TableDecl.Line) = .empty;
+        while (true) {
+            const t = p.tok();
+            if (t.tag == .eof or !t.first_on_line or t.col == 1) break;
+            if (t.tag != .lower) return p.errAt(t, "expected a line of the table, such as 'key id' or 'read everyone', but found '{s}'", .{describe(t)});
+            const word = p.advance();
+            const arg = p.tok();
+            if (arg.first_on_line or (arg.tag != .lower and arg.tag != .upper)) return p.errAt(arg, "expected what '{s}' is, as in '{s} everyone', but found '{s}'", .{ word.text, word.text, describe(arg) });
+            _ = p.advance();
+            const n = p.tok();
+            if (n.tag != .eof and !n.first_on_line) return p.errAt(n, "a line of a table has two words, as in 'read everyone'; found '{s}' after them", .{describe(n)});
+            try lines.append(p.a, .{ .word = word.text, .arg = arg.text });
+        }
+        return .{ .table = .{ .name = name, .row_type = row_type, .lines = lines.items } };
     }
 
     fn parseTypeDecl(p: *Parser) Error!@FieldType(Item, "kind") {
@@ -932,9 +974,9 @@ const Parser = struct {
         return p.parseExprBp(0);
     }
 
-    const OpInfo = struct { prec: u8, right: bool };
+    pub const OpInfo = struct { prec: u8, right: bool };
 
-    fn opInfo(text: []const u8) ?OpInfo {
+    pub fn opInfo(text: []const u8) ?OpInfo {
         const table = .{
             .{ "|>", 0, false },  .{ "<|", 0, true },
             .{ "??", 1, false },  .{ "||", 2, true },
@@ -1794,7 +1836,7 @@ fn snakeQualified(a: Allocator, name: []const u8) Allocator.Error![]const u8 {
     return std.fmt.allocPrint(a, "{s}{s}", .{ name[0 .. dot + 1], try snake(a, name[dot + 1 ..]) });
 }
 
-const Emitter = struct {
+pub const Emitter = struct {
     a: Allocator,
     diag: *Diagnostic,
     buf: std.ArrayList(u8) = .empty,
@@ -1827,12 +1869,17 @@ const Emitter = struct {
     /// `Db.query` after `import pf.Sql as Db`, `query` when it is exposed):
     /// its SQL has to be written in the program (rule P301).
     sql_query_names: std.ArrayList([]const u8) = .empty,
+    /// The name the file uses for the platform's `Db` module, whose
+    /// `Db.filter`, `Db.all`, ... make the queries of query.zig.
+    db_alias: ?[]const u8 = null,
+    /// The tables the module declares, by name (query.zig).
+    tables: std.StringHashMapUnmanaged(*query.Table) = .empty,
 
     /// `order` is not `.none` for names imported unqualified from a Roc
     /// module (`import Json exposing [decode]`).
     const Binding = struct { name: []const u8, arity: ?u8, anno: bool = false, order: stdlib.Order = .none };
 
-    fn w(e: *Emitter, s: []const u8) Error!void {
+    pub fn w(e: *Emitter, s: []const u8) Error!void {
         // Text taken from the source as it is maps back to it by itself.
         if (e.inSrc(s)) try e.markAt(s, @intCast(s.len));
         try e.buf.appendSlice(e.a, s);
@@ -1852,7 +1899,7 @@ const Emitter = struct {
         return p >= base and p + s.len <= base + e.src.len;
     }
 
-    fn markAt(e: *Emitter, orig: []const u8, roc_len: u32) Error!void {
+    pub fn markAt(e: *Emitter, orig: []const u8, roc_len: u32) Error!void {
         try e.marks.append(e.a, .{
             .roc = @intCast(e.buf.items.len),
             .roc_len = roc_len,
@@ -1861,7 +1908,7 @@ const Emitter = struct {
         });
     }
 
-    fn nl(e: *Emitter) Error!void {
+    pub fn nl(e: *Emitter) Error!void {
         try e.w("\n");
         var i: u32 = 0;
         while (i < e.indent) : (i += 1) try e.w("    ");
@@ -1885,6 +1932,7 @@ const Emitter = struct {
             else => {},
         };
         try e.findSqlQuery(items);
+        try query.resolveTables(e, items);
         try e.loadImports(items);
         try e.bindItems(items);
         if (moduleHeaderName(items) != null) {
@@ -1913,7 +1961,7 @@ const Emitter = struct {
                     own_type = item;
                     continue;
                 },
-                .anno, .def, .type_alias, .expect => {},
+                .anno, .def, .type_alias, .expect, .table => {},
             }
             try inner.append(e.a, item);
         }
@@ -1969,7 +2017,7 @@ const Emitter = struct {
         if (items.len == 0) return null;
         const raw = switch (items[0].kind) {
             .raw => |r| r,
-            .anno, .def, .type_alias, .type_nominal, .expect => return null,
+            .anno, .def, .type_alias, .type_nominal, .expect, .table => return null,
         };
         if (!std.mem.startsWith(u8, raw, "module ")) return null;
         const rest = std.mem.trimStart(u8, raw["module ".len..], " ");
@@ -2021,6 +2069,13 @@ const Emitter = struct {
                     try e.w("expect ");
                     try e.emitBody(b);
                 },
+                // A table lives in the database; its queries carry its SQL.
+                .table => |t| {
+                    try e.w("# table ");
+                    try e.w(t.name);
+                    try e.w(" : ");
+                    try e.w(t.row_type);
+                },
             }
             for (item.trailing_comments) |c| {
                 try e.nl();
@@ -2032,7 +2087,7 @@ const Emitter = struct {
     fn definesEquality(items: []const Item) bool {
         for (items) |item| switch (item.kind) {
             .def => |d| if (d.pat.* == .ident and (std.mem.eql(u8, d.pat.ident, "isEq") or std.mem.eql(u8, d.pat.ident, "toHash"))) return true,
-            .raw, .anno, .type_alias, .type_nominal, .expect => {},
+            .raw, .anno, .type_alias, .type_nominal, .expect, .table => {},
         };
         return false;
     }
@@ -2251,7 +2306,7 @@ const Emitter = struct {
         for (items) |item| switch (item.kind) {
             .anno => |an| try e.scope.append(e.a, .{ .name = try snake(e.a, an.name), .arity = typeArity(an.ty), .anno = true }),
             .def => |d| try e.bindDef(d.pat, d.body),
-            .raw, .type_alias, .type_nominal, .expect => {},
+            .raw, .type_alias, .type_nominal, .expect, .table => {},
         };
     }
 
@@ -2491,7 +2546,7 @@ const Emitter = struct {
                 try iface.types.put(e.a, tn.name, tags.items);
             },
             .type_alias => |ta| try iface.types.put(e.a, ta.name, &.{}),
-            .raw, .expect => {},
+            .raw, .expect, .table => {},
         };
         if (moduleHeaderName(items)) |m| if (iface.types.get(m)) |tags| if (tags.len == 0 and !hasNominal(items, m)) {
             iface.own_alias = m;
@@ -2519,6 +2574,7 @@ const Emitter = struct {
         for (items) |item| {
             if (item.kind != .raw) continue;
             const imp = parseImport(item.kind.raw) orelse continue;
+            if (imp.package != null and std.mem.eql(u8, imp.module, "Db")) e.db_alias = imp.alias;
             if (imp.package == null or !std.mem.eql(u8, imp.module, "Sql")) continue;
             try e.sql_query_names.append(e.a, try std.fmt.allocPrint(e.a, "{s}.query", .{imp.alias}));
             const list = imp.exposing orelse continue;
@@ -2559,7 +2615,7 @@ const Emitter = struct {
                 const msg = try std.fmt.allocPrint(e.a, "'{s}' is exposed, so it needs a type annotation. Write '{s} : ...' on the line above its definition.", .{ raw, raw });
                 return e.errAtRule(raw, .exposed_without_annotation, msg);
             },
-            .raw, .anno, .type_alias, .type_nominal, .expect => {},
+            .raw, .anno, .type_alias, .type_nominal, .expect, .table => {},
         };
     }
 
@@ -2569,7 +2625,7 @@ const Emitter = struct {
     }
 
     /// Like `errAtText`, for a broken design rule (rules.zig).
-    fn errAtRule(e: *Emitter, text: []const u8, rule: Rule, message: []const u8) Error {
+    pub fn errAtRule(e: *Emitter, text: []const u8, rule: Rule, message: []const u8) Error {
         const err = e.errAtText(text, try std.fmt.allocPrint(e.a, "{s}: {s}", .{ rule.code(), message }));
         e.diag.code = rule.code();
         return err;
@@ -2757,6 +2813,7 @@ const Emitter = struct {
         const args = call.args;
         const f_ident = if (func.* == .paren and func.paren.* == .ident) func.paren else func;
         if (f_ident.* == .ident and e.isSqlQuery(f_ident.ident)) try e.checkSqlLiteral(f_ident.ident, args);
+        if (f_ident.* == .ident) if (query.member(e, f_ident.ident)) |m| return query.emit(e, f_ident.ident, m, args);
         if (f_ident.* == .ident) if (try e.helperFor(f_ident.ident)) |h| if (h.tmpl) |tmpl| if (args.len == h.arity) {
             try e.markAt(f_ident.ident, 0);
             return e.emitTemplate(tmpl, args);
@@ -2820,7 +2877,7 @@ const Emitter = struct {
         }
     }
 
-    fn newExpr(e: *Emitter, v: Expr) Error!*Expr {
+    pub fn newExpr(e: *Emitter, v: Expr) Error!*Expr {
         const x = try e.a.create(Expr);
         x.* = v;
         return x;
@@ -2962,11 +3019,13 @@ const Emitter = struct {
         return e.emitExpr(x);
     }
 
-    fn emitExpr(e: *Emitter, x: *Expr) Error!void {
+    pub fn emitExpr(e: *Emitter, x: *Expr) Error!void {
         switch (x.*) {
             .ident => |name| {
                 // `Sql.query` as a value would let SQL in that isn't in the program.
                 if (e.isSqlQuery(name)) try e.checkSqlLiteral(name, &.{});
+                if (query.member(e, name) != null) return query.notInPipeline(e, name);
+                if (e.tables.contains(name)) return query.tableAsValue(e, name);
                 // A builtin whose arguments punkroc reorders, used as a value
                 // (`List.map` on its own): a lambda that reorders them.
                 if (try e.calleeArity(x)) |callee| {

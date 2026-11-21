@@ -28,12 +28,71 @@ handle! = fn req ->
 | `Log` | `info!`, `warn!`, `error! : Str => {}` |
 | `Postgres` | `rows! : Row.Decoder a -> Sql.Query => Result (List a) _`, `row!` (at most one row: `Maybe a`), `execute! : Sql.Query => Result U64 _` (rows changed) |
 | `Sql` | `query : Str -> List Sql.Param -> Sql.Query` (the SQL is a literal, rule P301), parameters `text`, `int`, `float`, `bool`, `null`, `nullable` |
+| `Db` | the query language: `table` declarations and pipelines (`links \|> Db.filter f \|> Db.first`), `run! : Db.Query a => Result a _`, `toSql` |
 | `Row` | decoders as Elm's `Json.Decode`: `field "url" Row.text`, columns `int`, `float`, `text`, `bool`, `nullable`; `map` to `map5`, `succeed`, `fail`, `andThen` |
 
 The example app is ambit's link shortener: `examples/punk/shortener/`, and
 the same app with its links in Postgres: `examples/punk/shortener-postgres/`.
 
-## Postgres
+## Postgres: tables and queries
+
+A table is declared in punk, with the type of its rows, its key and who may
+do what with its rows. Queries are pipelines from the table, as in Acadia;
+punk compiles each one to one SQL statement with parameters (no ORM, no
+N+1), and the rows to the query's type:
+
+```
+import pf.Db
+
+type alias Link =
+    { id : Str
+    , url : Str
+    , created : Int
+    }
+
+table links : Link
+    key id
+    read everyone
+    insert everyone
+    update nobody
+    delete nobody
+
+findLink : Str -> Db.Query (Maybe Link)
+findLink = fn id ->
+    links
+        |> Db.filter (fn link -> link.id == id)
+        |> Db.first
+
+-- SELECT id, url, created FROM links WHERE id = $1 LIMIT 1
+```
+
+- **Steps.** `Db.filter` (several are joined with AND) and at most one
+  `Db.map` (`.url`, or a record `{ url = l.url, later = l.created + 10 }`),
+  then one of `Db.all`, `Db.first`, `Db.update (fn l -> { l | url = new })`
+  or `Db.delete`. `Db.insert row links` and `Db.insertIfNew row links` (`ON
+  CONFLICT DO NOTHING`) add a row. `Db.run!` runs a `Db.Query a`; the
+  changing ones give the number of rows changed.
+- **Checked by the compiler, without a database.** A column the table
+  doesn't have, a literal of the wrong type and a comparison of a `Str` with
+  an `Int` are errors with a code (P403); a function the database can't run
+  (your own function, `String.startsWith`) is P402. A value from outside the
+  query becomes a parameter typed by the column it meets (`Db.param_text`),
+  so Roc's type checker catches a variable of the wrong type.
+- **A policy per table.** A table says who may read, insert, update and
+  delete; without all four it doesn't compile (P401), and a query that
+  does what the policy forbids is P404. In B1 a policy is `everyone` or
+  `nobody`; B2 adds functions of the user and the row, which become
+  Postgres row-level security.
+- **The schema comes from the program.** `punk check --schema app.punk`
+  prints the `CREATE TABLE` statements (`Str` is `text`, `Int` `bigint`,
+  `Float` `double precision`, `Bool` `boolean`, `Maybe` nullable, the key
+  `PRIMARY KEY`). The golden tests check that `schema.sql` next to an app is
+  what it prints.
+- **SQL by hand stays.** For what the language can't do yet (joins, sorting,
+  aggregates, more than one table), `Sql.query` and `Row` below are the
+  escape hatch.
+
+## Postgres: SQL by hand
 
 ```
 import pf.Postgres
@@ -76,11 +135,9 @@ resolve! = fn id ->
 - **A capability.** The wiring opens the database and hands it to the app
   (`App::with_database`); the app never sees the connection string, and an
   app without one gets `PgErr { code = "08000", .. }` for every query.
-- **What B1 builds on.** The Acadia-style query language (roadmap B1) will
-  compile a pipeline (`Db.access links |> Db.filter ... |> Db.selectAll`) to
-  exactly these two values, a `Sql.Query` and a `Row.Decoder`, made by the
-  compiler from the table's type, and run them with `Postgres.rows!`. Written
-  SQL with `Sql.query` stays as the escape hatch.
+- **What the query language makes.** A `Db.Query` is exactly such a
+  `Sql.Query` and a `Row.Decoder`, made by the compiler from the table's
+  type (`platforms/server/Db.roc`).
 
 The database itself is the crate `postgres/` (`punk-server-postgres`), for
 the wiring on Linux and macOS:
@@ -193,9 +250,14 @@ shortener checks it too).
 ## Not there yet
 
 - Transactions: each query commits on its own. A `Transaction a` value (as
-  in Acadia) comes with the query language, B1.
-- Row-level security: decided to be mandatory per table, comes with B1/B2.
-  Until then the database's own roles and policies are the wiring's job.
+  in Acadia) comes with B2.
+- Row-level security: every table has a policy now, but only `everyone` or
+  `nobody`, checked by the compiler. Policies on the user and the row, as
+  Postgres row-level security, come with B2; until then the database's own
+  roles are the wiring's job.
+- The query language: joins, sorting, paging and aggregates (B2 and later),
+  tables shared between modules, own types as columns (`type LinkId =
+  LinkId Str`), and checking `Sql.query`'s SQL against the tables.
 - TLS to the database (`NoTls` now: for a database on the same machine or a
   private network), and Postgres on hermit (the `postgres` crate needs
   tokio, which doesn't run there yet).

@@ -2,7 +2,7 @@ platform ""
     requires {
         handle! : Http.Request => Http.Response
     }
-    exposes [Http, Clock, Random, Kv, Config, Log, Postgres, Sql, Row]
+    exposes [Http, Clock, Random, Kv, Config, Log, Postgres, Sql, Row, Db]
     packages {}
     provides { "roc_handle": handle_for_host! }
     hosted {
@@ -31,6 +31,7 @@ platform ""
 import Http
 import Clock
 import Config
+import Db
 import Kv
 import Log
 import Postgres

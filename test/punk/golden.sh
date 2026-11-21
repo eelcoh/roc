@@ -8,6 +8,7 @@
 #     sh test/punk/golden.sh --update   write the expected output anew
 #
 # Server apps are only type-checked here (their crate's cargo test runs them).
+# A schema.sql next to an app has to be what `punk check --schema` prints.
 # It fails as well when a program in examples/punk/ has no case, so that a
 # new example cannot be forgotten, when a .punk file there is not laid out
 # as `punk fmt` would, and when src/punk/llms.txt is out of date.
@@ -86,6 +87,23 @@ for f in $server_apps; do
     else
         echo "FAIL check $f"
         sed 's/^/     /' "$work/check" | tail -n 30
+        failed=$((failed + 1))
+    fi
+done
+
+# A schema.sql next to an app with tables is what `punk check --schema`
+# prints for it, so the database holds what the program declares.
+for schema in $(find examples/punk -name schema.sql | sort); do
+    app=$(grep -l '^table ' "$(dirname "$schema")"/*.punk 2>/dev/null | head -n 1)
+    if [ -z "$app" ]; then
+        echo "FAIL $schema: no .punk file next to it declares a table"
+        failed=$((failed + 1))
+    elif "$roc" check --schema "$app" > "$work/schema" 2>&1 && diff -u "$schema" "$work/schema" > "$work/diff"; then
+        echo "ok   schema $schema"
+        passed=$((passed + 1))
+    else
+        echo "FAIL schema $schema: run '$roc check --schema $app > $schema'"
+        sed 's/^/     /' "$work/diff" "$work/schema" | tail -n 30
         failed=$((failed + 1))
     fi
 done

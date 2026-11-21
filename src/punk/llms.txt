@@ -322,6 +322,10 @@ Positions are 1-based and in the `.punk` file. `code` is stable:
 | `P102` | `dbg` outside an `expect` |
 | `P201` | an exposed value of a module has no type annotation |
 | `P301` | the SQL of `Sql.query` is not a string literal: pass values as parameters (`$1`) |
+| `P401` | a `table` declaration: its row type is not a record of storable columns, its key is not a column, or a policy line is missing |
+| `P402` | a query that can't run in the database: not a pipeline from a table to `Db.all`/`first`/`update`/`delete`, or a function the database can't run |
+| `P403` | a query uses a column the table doesn't have, or a value of the wrong type |
+| `P404` | a query does what the table's policy forbids (`delete nobody`) |
 | `roc/<title>` | a problem the type checker found, such as `roc/type-mismatch`, `roc/name-not-in-scope`, `roc/missing-method` |
 
 Warnings (`severity: "warning"`) do not stop the program. A warning
@@ -391,7 +395,63 @@ the world: no files, no network, no environment. It is not run with
 and tests (see `platforms/server/README.md` and `examples/punk/shortener/`).
 Annotate an effect with more arguments as `Settings -> Str => Result Response _`.
 
-### Postgres
+### Postgres: tables and queries
+
+Declare a table in punk, with the type of its rows, its key and who may
+read, insert, update and delete its rows (a table without all four doesn't
+compile, P401). Queries are pipelines from the table; punk turns each one
+into one SQL statement with parameters, and checks the columns and their
+types. `punk check --schema app.punk` prints the `CREATE TABLE`.
+
+```
+import pf.Db
+
+type alias Link =
+    { id : Str
+    , url : Str
+    , created : Int
+    }
+
+table links : Link
+    key id
+    read everyone
+    insert everyone
+    update nobody
+    delete nobody
+
+findLink : Str -> Db.Query (Maybe Link)
+findLink = fn id ->
+    links
+        |> Db.filter (fn link -> link.id == id)
+        |> Db.first
+
+-- in an effect: case try Db.run! (findLink id) of ...
+```
+
+```
+Db.filter : (row -> Bool) -> query -> query       -- several filters: AND
+Db.map : (row -> b) -> query -> query             -- .url, or a record { url = l.url, ... }
+Db.all : query -> Db.Query (List row)             -- ends a query
+Db.first : query -> Db.Query (Maybe row)          -- LIMIT 1
+Db.insert : row -> table -> Db.Query Int          -- the number of rows changed
+Db.insertIfNew : row -> table -> Db.Query Int     -- ON CONFLICT DO NOTHING: 0 when the key is taken
+Db.update : (row -> row) -> query -> Db.Query Int -- (fn l -> { l | url = new }), after filters
+Db.delete : query -> Db.Query Int
+Db.run! : Db.Query a => Result a _                -- errors: PgErr { code, message }, RowErr Str
+Db.toSql : Db.Query a -> Str
+```
+
+Column types: `Str`, `Int`, `Float`, `Bool`, and `Maybe` of one of these
+(a column that can be NULL; compare it with `== Nothing`). The functions of
+`filter`, `map` and `update` are written in the query (`fn link -> ...`) and
+use only the row's fields, values from outside the query (they become
+parameters), `==`, `/=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `not`, `+`, `-`,
+`*` and `++`; anything else is P402: compute it before the query. `filter`
+comes before `map`, and a query has at most one `map`. A table's name is not
+a value: it only starts a query. For what the query language can't do yet
+(joins, sorting, aggregates), write the SQL yourself with `Sql.query`:
+
+### Postgres: SQL by hand
 
 The database the wiring gives the app. A query is SQL written in the program
 plus its parameters (`$1`, `$2`, ...); a row decoder reads the rows, as
@@ -1258,15 +1318,15 @@ app [handle!] { pf: platform "../../../platforms/server/main.roc", json: "../../
 import pf.Http exposing [Request, Response]
 import pf.Clock
 import pf.Random
-import pf.Postgres
-import pf.Sql
-import pf.Row
+import pf.Db
 import pf.Config
 import pf.Log
 import json.Decode as D
 
 {-| A link shortener: ambit's `apps/shortener`, in punk, with its links in
-Postgres (`schema.sql`) instead of a key-value store.
+Postgres instead of a key-value store. The table and its queries are written
+in punk's query language: punk turns each query into one SQL statement, and
+`punk check --schema` gives the table's `CREATE TABLE` (`schema.sql`).
 
 - `POST /links` with a URL as body: creates a short link, 201 with the short URL.
 - `GET /<id>`: 302 to the URL, 404 if unknown, 410 once expired.
@@ -1289,26 +1349,30 @@ settings =
 
 -- A stored link: a row of the table `links`.
 type alias Link =
-    { created : Int
+    { id : Str
     , url : Str
+    , created : Int
     }
 
-linkRow : Row.Decoder Link
-linkRow =
-    Row.map2 (fn created, url -> { created, url })
-        (Row.field "created" Row.int)
-        (Row.field "url" Row.text)
+-- The links, one row each. Anyone may look a link up or make one; nobody
+-- changes or removes one.
+table links : Link
+    key id
+    read everyone
+    insert everyone
+    update nobody
+    delete nobody
 
-findLink : Str -> Sql.Query
+findLink : Str -> Db.Query (Maybe Link)
 findLink = fn id ->
-    Sql.query "SELECT created, url FROM links WHERE id = $1" [Sql.text id]
+    links
+        |> Db.filter (fn link -> link.id == id)
+        |> Db.first
 
--- Inserts the link, unless the id is taken: then it changes no row.
-insertLink : Str -> Link -> Sql.Query
-insertLink = fn id, link ->
-    Sql.query
-        "INSERT INTO links (id, url, created) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING"
-        [Sql.text id, Sql.text link.url, Sql.int link.created]
+-- Inserts the link, unless its id is taken: then it changes no row.
+insertLink : Link -> Db.Query Int
+insertLink = fn link ->
+    Db.insertIfNew link links
 
 maxUrl : U64
 maxUrl = 2048
@@ -1355,14 +1419,14 @@ create! = fn config, body ->
 
 resolve! : Settings -> Str => Result Response _
 resolve! = fn config, id ->
-    case try Postgres.row! linkRow (findLink id) of
+    case try Db.run! (findLink id) of
         Nothing -> Ok (text 404 "not found\n")
-        Just { created, url } ->
-            if unixSeconds (Clock.now! ()) >= created + config.ttlSeconds then
+        Just link ->
+            if unixSeconds (Clock.now! ()) >= link.created + config.ttlSeconds then
                 Ok (text 410 "expired\n")
             else
                 -- The URL was checked to be a valid header value when it was stored.
-                Ok (withHeader "location" url (text 302 ""))
+                Ok (withHeader "location" link.url (text 302 ""))
 
 -- Stores the URL under a fresh id; `Nothing` when no free id was found.
 store! : Str -> Int => Result (Maybe Str) _
@@ -1371,8 +1435,8 @@ store! = fn url, attemptsLeft ->
         Ok Nothing
     else
         id = newId (Random.u64! ())
-        link = { created = unixSeconds (Clock.now! ()), url }
-        inserted = try Postgres.execute! (insertLink id link)
+        link = { id, url, created = unixSeconds (Clock.now! ()) }
+        inserted = try Db.run! (insertLink link)
         if inserted == 0 then
             store! url (attemptsLeft - 1)
         else
