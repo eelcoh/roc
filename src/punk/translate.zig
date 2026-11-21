@@ -69,12 +69,62 @@ pub fn translate(arena: Allocator, src: []const u8, diag: *Diagnostic) Error![]c
 /// Like `translate`, but the interfaces of imported modules come from
 /// `resolver` (see `Resolver`).
 pub fn translateWith(arena: Allocator, src: []const u8, diag: *Diagnostic, resolver: ?Resolver) Error![]const u8 {
+    return (try translateMapped(arena, src, diag, resolver)).roc;
+}
+
+/// Where a piece of the Roc translation came from in the punkroc source:
+/// `roc_len` bytes at `roc` in the translation were written for the
+/// `punk_len` bytes at `punk` in the source (a name, a literal, an operator).
+pub const Mark = struct { roc: u32, roc_len: u32, punk: u32, punk_len: u32 };
+
+/// A translation together with its source map: the marks, in the order of
+/// their place in the translation.
+pub const Mapped = struct { roc: []const u8, marks: []const Mark };
+
+/// Like `translateWith`, but also says which part of the source each name,
+/// literal and operator in the translation came from, so the compiler can
+/// point at the `.punk` file in its error messages.
+pub fn translateMapped(arena: Allocator, src: []const u8, diag: *Diagnostic, resolver: ?Resolver) Error!Mapped {
     const toks = try lex(arena, src, diag);
     var p = Parser{ .a = arena, .src = src, .toks = toks, .diag = diag };
     const items = try p.parseModule();
     var e = Emitter{ .a = arena, .diag = diag, .src = src, .resolver = resolver };
     try e.emitModule(items);
-    return e.buf.items;
+    return .{ .roc = e.buf.items, .marks = e.marks.items };
+}
+
+/// The span of the source the bytes `start..end` of the translation came
+/// from, as byte offsets in the source. A span the translation reordered
+/// (`xs |> List.map f` is `List.map(xs, f)`) covers all of its pieces.
+pub fn sourceSpan(marks: []const Mark, start: u32, end: u32) struct { start: u32, end: u32 } {
+    // The first mark that ends after `start`.
+    var lo: usize = 0;
+    var hi: usize = marks.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        if (marks[mid].roc + marks[mid].roc_len <= start) lo = mid + 1 else hi = mid;
+    }
+    var first: ?u32 = null;
+    var last: u32 = 0;
+    var i = lo;
+    while (i < marks.len and (marks[i].roc < end or (start == end and marks[i].roc == start))) : (i += 1) {
+        const m = marks[i];
+        const into = if (start > m.roc) @min(start - m.roc, m.punk_len) else 0;
+        const upto = if (end < m.roc + m.roc_len) @min(end -| m.roc, m.punk_len) else m.punk_len;
+        const s = m.punk + into;
+        const t = @max(m.punk + upto, s);
+        first = if (first) |f| @min(f, s) else s;
+        last = @max(last, t);
+    }
+    if (first) |f| return .{ .start = f, .end = last };
+    // Only generated text: point just after the piece before it, or at the
+    // piece after it.
+    if (lo > 0) {
+        const m = marks[lo - 1];
+        return .{ .start = m.punk + m.punk_len, .end = m.punk + m.punk_len };
+    }
+    if (lo < marks.len) return .{ .start = marks[lo].punk, .end = marks[lo].punk };
+    return .{ .start = 0, .end = 0 };
 }
 
 /// The interface of a punkroc module: its functions with their arity, its
@@ -1712,6 +1762,8 @@ const Emitter = struct {
     a: Allocator,
     diag: *Diagnostic,
     buf: std.ArrayList(u8) = .empty,
+    /// The source map of `buf`; see `Mark`.
+    marks: std.ArrayList(Mark) = .empty,
     indent: u32 = 0,
     /// Names in scope, innermost last, with the arity of the function they
     /// hold when the emitter knows it (null: not a known function).
@@ -1737,7 +1789,32 @@ const Emitter = struct {
     const Binding = struct { name: []const u8, arity: ?u8, anno: bool = false, order: stdlib.Order = .none };
 
     fn w(e: *Emitter, s: []const u8) Error!void {
+        // Text taken from the source as it is maps back to it by itself.
+        if (e.inSrc(s)) try e.markAt(s, @intCast(s.len));
         try e.buf.appendSlice(e.a, s);
+    }
+
+    /// Writes `s`, the Roc spelling of `orig` from the source (`isGood` is
+    /// `is_good`), and remembers where it came from.
+    fn wFrom(e: *Emitter, orig: []const u8, s: []const u8) Error!void {
+        if (s.ptr != orig.ptr and e.inSrc(orig)) try e.markAt(orig, @intCast(s.len));
+        try e.w(s);
+    }
+
+    fn inSrc(e: *const Emitter, s: []const u8) bool {
+        if (s.len == 0 or e.src.len == 0) return false;
+        const p = @intFromPtr(s.ptr);
+        const base = @intFromPtr(e.src.ptr);
+        return p >= base and p + s.len <= base + e.src.len;
+    }
+
+    fn markAt(e: *Emitter, orig: []const u8, roc_len: u32) Error!void {
+        try e.marks.append(e.a, .{
+            .roc = @intCast(e.buf.items.len),
+            .roc_len = roc_len,
+            .punk = @intCast(@intFromPtr(orig.ptr) - @intFromPtr(e.src.ptr)),
+            .punk_len = @intCast(orig.len),
+        });
     }
 
     fn nl(e: *Emitter) Error!void {
@@ -1854,7 +1931,7 @@ const Emitter = struct {
             switch (item.kind) {
                 .raw => |r| if (parseImport(r) != null) try e.emitImport(r) else try e.w(r),
                 .anno => |an| {
-                    try e.w(try snake(e.a, an.name));
+                    try e.wFrom(an.name, try snake(e.a, an.name));
                     try e.w(" : ");
                     try e.emitType(an.ty, false);
                 },
@@ -1978,7 +2055,7 @@ const Emitter = struct {
         try e.w("(");
         for (params, 0..) |prm, i| {
             if (i > 0) try e.w(", ");
-            try e.w(try snake(e.a, prm));
+            try e.wFrom(prm, try snake(e.a, prm));
         }
         try e.w(")");
     }
@@ -2028,7 +2105,7 @@ const Emitter = struct {
             },
             .anno => |an| {
                 try e.scope.append(e.a, .{ .name = try snake(e.a, an.name), .arity = typeArity(an.ty), .anno = true });
-                try e.w(try snake(e.a, an.name));
+                try e.wFrom(an.name, try snake(e.a, an.name));
                 try e.w(" : ");
                 try e.emitType(an.ty, false);
             },
@@ -2045,7 +2122,7 @@ const Emitter = struct {
     fn emitIdent(e: *Emitter, raw: []const u8) Error!void {
         try e.checkExposed(raw);
         const name = stdlib.rocName(try snakeQualified(e.a, raw));
-        try e.w(name);
+        try e.wFrom(raw, name);
     }
 
     // currying
@@ -2727,7 +2804,7 @@ const Emitter = struct {
             .field => |f| {
                 try e.emitAtomic(f.target);
                 try e.w(".");
-                try e.w(try snake(e.a, f.name));
+                try e.wFrom(f.name, try snake(e.a, f.name));
             },
             .app => |app| try e.emitCall(app.func, app.args),
             .binop => |b| {
@@ -2743,7 +2820,7 @@ const Emitter = struct {
                 const gap: []const u8 = if (std.mem.startsWith(u8, b.op, "..")) "" else " ";
                 try e.emitBinopChild(b.lhs, info.prec, false);
                 try e.w(gap);
-                try e.w(rocOp(b.op));
+                try e.wFrom(b.op, rocOp(b.op));
                 try e.w(gap);
                 try e.emitBinopChild(b.rhs, info.prec, true);
             },
@@ -2891,7 +2968,8 @@ const Emitter = struct {
                 i = j;
                 continue;
             }
-            try e.buf.append(e.a, raw[i]);
+            // Through `w`, so each character maps back to the source.
+            try e.w(raw[i .. i + 1]);
             i += 1;
         }
     }
@@ -2905,7 +2983,7 @@ const Emitter = struct {
     fn emitPattern(e: *Emitter, pat: *Pattern) Error!void {
         switch (pat.*) {
             .ident => |name| try e.emitIdent(name),
-            .underscore => |name| try e.w(try snake(e.a, name)),
+            .underscore => |name| try e.wFrom(name, try snake(e.a, name)),
             .tag => |t| {
                 try e.checkExposed(t.name);
                 try e.w(t.name);
@@ -2930,7 +3008,7 @@ const Emitter = struct {
                         try e.w("..");
                         continue;
                     }
-                    try e.w(try snake(e.a, f.name));
+                    try e.wFrom(f.name, try snake(e.a, f.name));
                     if (f.pat) |sub| {
                         try e.w(": ");
                         try e.emitPattern(sub);
@@ -2950,13 +3028,13 @@ const Emitter = struct {
                 try e.w("..");
                 if (name) |n| {
                     try e.w(" as ");
-                    try e.w(try snake(e.a, n));
+                    try e.wFrom(n, try snake(e.a, n));
                 }
             },
             .as_ => |as_| {
                 try e.emitPattern(as_.pat);
                 try e.w(" as ");
-                try e.w(try snake(e.a, as_.name));
+                try e.wFrom(as_.name, try snake(e.a, as_.name));
             },
         }
     }
@@ -2965,7 +3043,7 @@ const Emitter = struct {
 
     fn emitType(e: *Emitter, t: *Type, in_args: bool) Error!void {
         switch (t.*) {
-            .name => |n| try e.w(if (std.ascii.isLower(n[0])) try snake(e.a, n) else try e.rocTypeName(n)),
+            .name => |n| try e.wFrom(n, if (std.ascii.isLower(n[0])) try snake(e.a, n) else try e.rocTypeName(n)),
             .app => |app| {
                 try e.w(if (std.mem.eql(u8, app.head, "Result")) "Try" else try e.rocTypeName(app.head));
                 try e.w("(");
@@ -3003,14 +3081,14 @@ const Emitter = struct {
                 try e.w("{ ");
                 for (r.fields, 0..) |f, i| {
                     if (i > 0) try e.w(", ");
-                    try e.w(try snake(e.a, f.name));
+                    try e.wFrom(f.name, try snake(e.a, f.name));
                     try e.w(" : ");
                     try e.emitType(f.ty, false);
                 }
                 if (r.ext) |ext| {
                     if (r.fields.len > 0) try e.w(", ");
                     try e.w("..");
-                    try e.w(try snake(e.a, ext));
+                    try e.wFrom(ext, try snake(e.a, ext));
                 }
                 try e.w(" }");
             },
@@ -3032,7 +3110,7 @@ const Emitter = struct {
                 if (u.ext) |ext| {
                     if (u.tags.len > 0) try e.w(", ");
                     try e.w("..");
-                    try e.w(try snake(e.a, ext));
+                    try e.wFrom(ext, try snake(e.a, ext));
                 }
                 try e.w("]");
             },
