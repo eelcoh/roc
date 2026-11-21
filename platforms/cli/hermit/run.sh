@@ -3,19 +3,37 @@
 #
 #     sh platforms/cli/hermit/run.sh examples/punk/hermit/hello.punk
 #
-# Run from the repo root, with `zig-out/bin/punk` built (zig build roc). Needs the Rust std for
-# x86_64-unknown-hermit (see README.md) and qemu-system-x86_64. The image is written to
+# Run from the repo root, with `zig-out/bin/punk` built (zig build roc) or PUNK set. Needs
+# the Rust std for x86_64-unknown-hermit (see README.md) and qemu-system-x86_64. The image is written to
 # platforms/cli/hermit/target/x86_64-unknown-hermit/release/punk-cli-hermit.
+# Started with `sh`: go on in bash.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -euo pipefail
 app=${1:?"usage: run.sh app.punk"}
 here=platforms/cli/hermit
+
+# The compiler: zig-out/bin/punk of this repository, or the one in PUNK (as the shortener's build.rs).
+punk=${PUNK:-zig-out/bin/punk}
+if [ ! -x "$punk" ]; then
+    echo "run.sh: no punk compiler at $punk. Build it with 'zig build roc' (from the repo root), or set PUNK."
+    exit 1
+fi
+if ! rustup run 1.97.1 rustc --print sysroot >/dev/null 2>&1 \
+    || [ ! -d "$(rustup run 1.97.1 rustc --print sysroot)/lib/rustlib/x86_64-unknown-hermit" ]; then
+    echo "run.sh: Rust 1.97.1 has no std for x86_64-unknown-hermit. See 'Setup' in $here/README.md."
+    exit 1
+fi
+if ! command -v qemu-system-x86_64 >/dev/null; then
+    echo "run.sh: qemu-system-x86_64 is not installed."
+    exit 1
+fi
 
 # 1. The app as a static archive, for freestanding x86-64 at the baseline CPU level (x64v1elf):
 #    Hermit's QEMU CPU model has no AVX. The cli platform's x64v1elf target has
 #    `output: Archive`, so roc doesn't link: cargo links the image.
 mkdir -p "$here/target"
 archive=$PWD/$here/target/libapp.a
-zig-out/bin/punk build --target=x64v1elf --output="$archive" "$app"
+"$punk" build --target=x64v1elf --output="$archive" "$app"
 
 # 2. The image: the hermit host (Rust std + kernel) with the app linked in.
 (cd "$here" && PUNK_APP_OBJECTS="$archive" cargo build --release --target x86_64-unknown-hermit)

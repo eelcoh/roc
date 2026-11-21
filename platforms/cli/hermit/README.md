@@ -35,7 +35,8 @@ hangs in QEMU's `qemu64` CPU model, which is what Hermit (and ambit) use.
 
 ## Setup
 
-The same as ambit's hermit backend:
+First the compiler: `zig build roc` in the repo root (or set `PUNK` to a
+`punk` binary). Then the same as ambit's hermit backend:
 
 - Rust 1.97.1 (`rust-toolchain.toml`) with the prebuilt std for Hermit:
   ```
