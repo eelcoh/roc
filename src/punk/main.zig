@@ -2,9 +2,11 @@
 //!
 //!     punk2roc input.punk            # prints the Roc code
 //!     punk2roc input.punk -o out.roc # writes it to a file
+//!     punk2roc --fmt input.punk      # prints the file as `punk fmt` lays it out
 
 const std = @import("std");
 const punk = @import("translate.zig");
+const format = @import("format.zig");
 
 /// Entry point of the `punk2roc` command.
 pub fn main(init: std.process.Init) void {
@@ -23,9 +25,12 @@ fn run(init: std.process.Init) RunError!void {
 
     var input: ?[]const u8 = null;
     var output: ?[]const u8 = null;
+    var fmt = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "-o") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], "--fmt")) {
+            fmt = true;
+        } else if (std.mem.eql(u8, args[i], "-o") and i + 1 < args.len) {
             i += 1;
             output = args[i];
         } else if (input == null) {
@@ -42,8 +47,8 @@ fn run(init: std.process.Init) RunError!void {
     };
 
     var diag: punk.Diagnostic = .{};
-    const roc = punk.translate(arena, src, &diag) catch |err| switch (err) {
-        error.ParseError => {
+    const roc = (if (fmt) format.format(arena, src, &diag) else punk.translate(arena, src, &diag)) catch |err| switch (err) {
+        error.ParseError, error.Unsafe => {
             std.debug.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
             std.process.exit(1);
         },
@@ -61,6 +66,6 @@ fn run(init: std.process.Init) RunError!void {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: punk2roc <input.punk> [-o <output.roc>]\n", .{});
+    std.debug.print("usage: punk2roc [--fmt] <input.punk> [-o <output>]\n", .{});
     std.process.exit(2);
 }

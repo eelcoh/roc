@@ -196,6 +196,7 @@ pub const CheckArgs = struct {
     no_cache: bool = false, // disable cache
     verbose: bool = false, // enable verbose output
     watch: bool = false, // rerun check when source inputs change
+    json: bool = false, // punkroc: write the problems as JSON on stdout
     watch_inputs_file: ?[]const u8 = null, // internal: write watch input paths and byte states here
     watch_ansi: AnsiStreams = .{},
     max_threads: ?usize = null, // max worker threads (null = auto, 1 = single-threaded)
@@ -992,6 +993,7 @@ const commands = [_]Command{
             .{ .name = "--no-cache", .field = "no_cache", .help = "Disable caching" },
             .{ .name = "--verbose", .field = "verbose", .help = "Enable verbose output including cache statistics" },
             .{ .name = "--watch", .field = "watch", .help = "Re-run when source inputs change" },
+            .{ .name = "--json", .field = "json", .help = "Write the problems as one JSON document on stdout (for tools and agents)" },
             jobs_flag,
         }),
         .resolve = .limits_and_replace_deps,
