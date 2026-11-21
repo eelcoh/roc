@@ -5,6 +5,17 @@
 #     sh test/punk/setup.sh
 #
 set -e
+
+# The compiler needs exactly this Zig (see build.zig.zon); another version
+# fails with errors such as "invalid builtin function: '@backingInt'".
+want=$(sed -n 's/.*minimum_zig_version = "\(.*\)".*/\1/p' build.zig.zon)
+have=$(zig version 2>/dev/null || echo none)
+if [ "$have" != "$want" ]; then
+    echo "punkroc needs Zig $want, but 'zig' here is $have ($(command -v zig || echo 'not found'))."
+    echo "See 'Zig' in src/punk/README.md."
+    exit 1
+fi
+
 zig build build-test-hosts -Dplatform=punk
 
 newest() { ls -t "$@" 2>/dev/null | head -n 1; }
