@@ -240,37 +240,90 @@ test "records" {
     );
 }
 
-test "var, for, while" {
+test "no var, for, while or return" {
+    try checkError("sum = fn xs ->\n    var total = 0\n    total\n", 2, "punkroc has no 'var'");
+    try checkError("f = fn xs ->\n    for x in xs\n        x\n", 2, "use 'fold x in xs");
+    try checkError("f = fn n ->\n    while n > 0\n        n\n", 2, "punkroc has no 'while'");
+    try checkError("f = fn n ->\n    return n\n", 2, "punkroc has no 'return'");
+}
+
+test "fold: inline, and without the list in a pipe" {
     try check(
-        \\sum = fn xs ->
-        \\    var total = 0
-        \\    for x in xs
-        \\        total = total + x
-        \\    "${Num.toStr total}"
+        \\som = fn xs ->
+        \\    fold xs into 0 with fn x, total -> total + x
         \\
-        \\count = fn () ->
-        \\    var i = 0
-        \\    while i < 5
-        \\        i = i + 1
-        \\    i
+        \\run = fn instrs ->
+        \\    instrs
+        \\        |> fold into { on = True, total = 0 } with step
+        \\        |> .total
+        \\
+        \\pairs = fold List.indexed xs into 0
+        \\    with add
     ,
-        \\sum = |xs| {
-        \\    var $total = 0
-        \\    for x in xs {
-        \\        $total = $total + x
-        \\    }
-        \\    "${Num.to_str($total)}"
-        \\}
+        \\som = |xs| List.fold(xs, 0, |total, x| total + x)
         \\
-        \\count = || {
-        \\    var $i = 0
-        \\    while $i < 5 {
-        \\        $i = $i + 1
+        \\run = |instrs| (|punk_record| punk_record.total)(List.fold(instrs, { on: True, total: 0 }, |punk_s1, punk_s2| step(punk_s2, punk_s1)))
+        \\
+        \\pairs = List.fold(List.indexed(xs), 0, |punk_s3, punk_s4| add(punk_s4, punk_s3))
+        \\
+    );
+}
+
+test "fold: block form with one and with more accumulators" {
+    try check(
+        \\som = fn xs ->
+        \\    fold x in xs into total = 0
+        \\        total + x
+        \\
+        \\maxIndex = fn xs ->
+        \\    fold (i, x) in List.indexed xs into bestI = 0, bestX = 0
+        \\        if x > bestX then { bestI = i, bestX = x } else {}
+        \\
+        \\run = fn instrs ->
+        \\    result =
+        \\        fold instr in instrs into on = True, total = 0
+        \\            case instr of
+        \\                Do -> { on = True }
+        \\                Dont -> { on = False }
+        \\                Mul a b -> if on then { total = total + a * b } else {}
+        \\    result.total
+    ,
+        \\som = |xs| List.fold(xs, 0, |total, x| total + x)
+        \\
+        \\max_index = |xs| List.fold(List.indexed(xs), { best_i: 0, best_x: 0 }, |punk_fold1, (i, x)| {
+        \\    { best_x, .. } = punk_fold1
+        \\    if x > best_x {
+        \\        { ..punk_fold1, best_i: i, best_x: x }
+        \\    } else {
+        \\        punk_fold1
         \\    }
-        \\    $i
+        \\})
+        \\
+        \\run = |instrs| {
+        \\    result = List.fold(instrs, { on: True, total: 0 }, |punk_fold2, instr| {
+        \\        { on, total } = punk_fold2
+        \\        match instr {
+        \\            Do => { ..punk_fold2, on: True }
+        \\            Dont => { ..punk_fold2, on: False }
+        \\            Mul(a, b) => if on {
+        \\                { ..punk_fold2, total: total + a * b }
+        \\            } else {
+        \\                punk_fold2
+        \\            }
+        \\        }
+        \\    })
+        \\    result.total
         \\}
         \\
     );
+}
+
+test "fold: errors" {
+    try checkError("s = fold xs 0 with f\n", 1, "expected 'into'");
+    try checkError("s = fold xs into 0 f\n", 2, "expected 'with'");
+    try checkError("s =\n    fold x in xs into a = 0, b = 0\n        { c = 1 }\n", 2, "'c' is not an accumulator");
+    try checkError("s =\n    fold x in xs into a = 0, a = 1\n        a\n", 2, "named twice");
+    try checkError("s =\n    fold x in xs into a = 0\ny = 1\n", 3, "indented further");
 }
 
 test "comments, headers, effects, try" {

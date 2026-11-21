@@ -128,6 +128,9 @@ pub const Tag = enum {
     kw_for,
     kw_in,
     kw_while,
+    kw_fold,
+    kw_into,
+    kw_with,
     kw_return,
     kw_crash,
     kw_dbg,
@@ -164,6 +167,9 @@ const keywords = std.StaticStringMap(Tag).initComptime(.{
     .{ "for", .kw_for },
     .{ "in", .kw_in },
     .{ "while", .kw_while },
+    .{ "fold", .kw_fold },
+    .{ "into", .kw_into },
+    .{ "with", .kw_with },
     .{ "return", .kw_return },
     .{ "crash", .kw_crash },
     .{ "dbg", .kw_dbg },
@@ -553,10 +559,7 @@ pub const Stmt = struct {
     blank_before: bool,
     kind: union(enum) {
         def: struct { pat: *Pattern, body: *Block },
-        var_def: struct { name: []const u8, body: *Block },
         anno: struct { name: []const u8, ty: *Type },
-        for_: struct { pat: *Pattern, iter: *Expr, body: *Block },
-        while_: struct { cond: *Expr, body: *Block },
         expect: *Block,
         expr: *Expr,
     },
@@ -622,8 +625,10 @@ const Parser = struct {
     /// current construct. 0 disables layout (inside brackets).
     stop_col: u32 = 1,
     /// When set, tokens on a later line end the current construct
-    /// (used for `for`/`while` headers, which have no closing keyword).
+    /// (used for `fold ... in` headers, which have no closing keyword).
     line_limit: ?u32 = null,
+    /// Numbers the record names that multi-accumulator folds make up.
+    fold_counter: u32 = 0,
     /// The token that starts the current statement, item or case branch is
     /// never a stop, even though it sits at the stop column.
     stmt_start: usize = std.math.maxInt(usize),
@@ -736,7 +741,7 @@ const Parser = struct {
                 _ = p.advance();
                 return .{ .anno = .{ .name = t.text, .ty = try p.parseType() } };
             },
-            .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_as, .eof => {},
+            .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_as, .eof => {},
         }
         const lhs = try p.parseExpr();
         _ = try p.expect(.equals, "'=' in a definition");
@@ -820,30 +825,7 @@ const Parser = struct {
     fn parseStmtKind(p: *Parser) Error!@FieldType(Stmt, "kind") {
         const t = p.tok();
         switch (t.tag) {
-            .kw_var => {
-                _ = p.advance();
-                const name = (try p.expect(.lower, "a variable name after 'var'")).text;
-                _ = try p.expect(.equals, "'=' after the variable name");
-                return .{ .var_def = .{ .name = name, .body = try p.parseBody() } };
-            },
-            .kw_for => {
-                _ = p.advance();
-                const saved = p.line_limit;
-                p.line_limit = t.line;
-                const pat = try p.parsePattern();
-                _ = try p.expect(.kw_in, "'in'");
-                const iter = try p.parseExpr();
-                p.line_limit = saved;
-                return .{ .for_ = .{ .pat = pat, .iter = iter, .body = try p.parseBody() } };
-            },
-            .kw_while => {
-                _ = p.advance();
-                const saved = p.line_limit;
-                p.line_limit = t.line;
-                const cond = try p.parseExpr();
-                p.line_limit = saved;
-                return .{ .while_ = .{ .cond = cond, .body = try p.parseBody() } };
-            },
+            .kw_var, .kw_for, .kw_while => return p.errAt(t, "punkroc has no '{s}': use 'fold x in xs into total = 0' or a recursive function", .{t.text}),
             .kw_expect => {
                 _ = p.advance();
                 return .{ .expect = try p.parseBody() };
@@ -853,7 +835,7 @@ const Parser = struct {
                 _ = p.advance();
                 return .{ .anno = .{ .name = t.text, .ty = try p.parseType() } };
             },
-            .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_in, .kw_return, .kw_crash, .kw_dbg, .kw_as, .kw_header, .eof => {},
+            .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_in, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_as, .kw_header, .eof => {},
         }
         const e = try p.parseExpr();
         if (p.at(.equals)) {
@@ -954,7 +936,9 @@ const Parser = struct {
             .kw_fn => return p.parseLambda(),
             .kw_if => return p.parseIf(),
             .kw_case => return p.parseCase(),
-            .kw_return, .kw_crash, .kw_dbg => {
+            .kw_fold => return p.parseFold(),
+            .kw_return => return p.errAt(t, "punkroc has no 'return': the last line of a body is its value", .{}),
+            .kw_crash, .kw_dbg => {
                 _ = p.advance();
                 return p.new(Expr, .{ .kw = .{ .kw = t.text, .arg = try p.parseExpr() } });
             },
@@ -965,7 +949,7 @@ const Parser = struct {
                 _ = p.advance();
                 return p.new(Expr, .{ .not = try p.parseApplication() });
             },
-            .lower, .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .question, .kw_then, .kw_else, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_expect, .kw_as, .kw_header, .eof => {},
+            .lower, .upper, .qlower, .int, .float, .string, .char, .lparen, .rparen, .lbrack, .rbrack, .lbrace, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .underscore, .question, .kw_then, .kw_else, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_into, .kw_with, .kw_expect, .kw_as, .kw_header, .eof => {},
         }
         return p.parseApplication();
     }
@@ -982,7 +966,7 @@ const Parser = struct {
             // `f -1` passes a negative number; `f - 1` subtracts.
             .op => std.mem.eql(u8, t.text, "-") and t.space_before and !p.peekAt(1).space_before and
                 (p.peekAt(1).tag == .int or p.peekAt(1).tag == .float or p.peekAt(1).tag == .lower),
-            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
+            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
         };
     }
 
@@ -1052,7 +1036,7 @@ const Parser = struct {
                 params[0] = param;
                 break :blk try p.new(Expr, .{ .paren = try p.new(Expr, .{ .lambda = .{ .params = params, .body = body } }) });
             },
-            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => return p.errAt(t, "expected an expression but found '{s}'", .{describe(t)}),
+            .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => return p.errAt(t, "expected an expression but found '{s}'", .{describe(t)}),
         };
         while (p.tok().tag == .dot_field and !p.tok().space_before) {
             const f = p.advance();
@@ -1138,6 +1122,183 @@ const Parser = struct {
         }
         _ = try p.expect(.rbrace, "'}' or ','");
         return p.new(Expr, .{ .record = .{ .base = base, .fields = fields.items } });
+    }
+
+    // fold
+
+    /// `fold xs into b with f` is `List.fold f b xs`. Without the list it is a
+    /// function that waits for one, so it fits in a pipe:
+    /// `xs |> fold into b with f`.
+    ///
+    /// The block form names the accumulators in its header:
+    ///
+    ///     fold x in xs into total = 0
+    ///         total + x
+    ///
+    /// With one accumulator the body gives its new value. With more, the body
+    /// gives a record with only the accumulators that change (`{}` when none
+    /// does), and the value of the fold is the record with all of them.
+    fn parseFold(p: *Parser) Error!*Expr {
+        const kw = p.advance(); // fold
+        if (p.foldHeaderHasIn(kw.line)) return p.parseFoldBlock(kw);
+        var list: ?*Expr = null;
+        if (!p.atFoldPart(.kw_into)) list = try p.parseApplication();
+        if (!p.atFoldPart(.kw_into)) {
+            return p.errAt(p.tok(), "expected 'into' and a starting value after 'fold {s}', like 'fold xs into 0 with f', but found '{s}'", .{ if (list == null) "" else "...", describe(p.tok()) });
+        }
+        _ = p.advance();
+        const init = try p.parseApplication();
+        if (!p.atFoldPart(.kw_with)) {
+            return p.errAt(p.tok(), "expected 'with' and a function after 'fold ... into ...', like 'fold xs into 0 with f', but found '{s}'", .{describe(p.tok())});
+        }
+        _ = p.advance();
+        var step = if (p.at(.kw_fn)) try p.parseLambda() else try p.parseApplication();
+        if (step.* == .lambda) step = try p.new(Expr, .{ .paren = step });
+        var args: std.ArrayList(*Expr) = .empty;
+        try args.append(p.a, step);
+        try args.append(p.a, init);
+        if (list) |l| try args.append(p.a, l);
+        const func = try p.new(Expr, .{ .ident = "List.fold" });
+        return p.new(Expr, .{ .app = .{ .func = func, .args = args.items } });
+    }
+
+    /// `into` and `with` may start a new line, as long as it is indented
+    /// further than the line the fold belongs to.
+    fn atFoldPart(p: *Parser, tag: Tag) bool {
+        return p.at(tag);
+    }
+
+    /// Whether the `fold` header is the block form: an `in` before any
+    /// `into`, outside brackets, on the line of `fold`.
+    fn foldHeaderHasIn(p: *Parser, line: u32) bool {
+        var depth: usize = 0;
+        var i = p.pos;
+        while (i < p.toks.len) : (i += 1) {
+            const t = p.toks[i];
+            if (t.tag == .eof or t.line != line) return false;
+            switch (t.tag) {
+                .lparen, .lbrack, .lbrace => depth += 1,
+                .rparen, .rbrack, .rbrace => depth -|= 1,
+                .kw_in => if (depth == 0) return true,
+                .kw_into => if (depth == 0) return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn parseFoldBlock(p: *Parser, kw: Token) Error!*Expr {
+        const saved = p.line_limit;
+        p.line_limit = kw.line;
+        const pat = try p.parsePattern();
+        _ = try p.expect(.kw_in, "'in'");
+        const iter = try p.parseExpr();
+        _ = try p.expect(.kw_into, "'into' and the accumulators, like 'into total = 0'");
+        var names: std.ArrayList([]const u8) = .empty;
+        var inits: std.ArrayList(Field) = .empty;
+        while (true) {
+            const name = (try p.expect(.lower, "an accumulator name, like 'into total = 0'")).text;
+            for (names.items) |n| if (std.mem.eql(u8, n, name)) {
+                return p.errAt(p.toks[p.pos - 1], "the accumulator '{s}' is named twice", .{name});
+            };
+            _ = try p.expect(.equals, "'=' and a starting value after the accumulator name");
+            const init = try p.parseExpr();
+            try names.append(p.a, name);
+            try inits.append(p.a, .{ .name = name, .value = init });
+            if (!p.at(.comma)) break;
+            _ = p.advance();
+        }
+        p.line_limit = saved;
+        if (p.tok().tag != .eof and p.tok().line == kw.line) {
+            return p.errAt(p.tok(), "expected the body of the fold on the next lines, indented, but found '{s}'", .{describe(p.tok())});
+        }
+        const body_start = p.pos;
+        const body = try p.parseBody();
+        const body_toks = p.toks[body_start..p.pos];
+
+        var params: std.ArrayList(*Pattern) = .empty;
+        try params.append(p.a, pat);
+        var lambda_body = body;
+        var start: *Expr = undefined;
+        if (names.items.len == 1) {
+            try params.append(p.a, try p.new(Pattern, .{ .ident = names.items[0] }));
+            start = inits.items[0].value.?;
+        } else {
+            p.fold_counter += 1;
+            const base = try std.fmt.allocPrint(p.a, "punkFold{d}", .{p.fold_counter});
+            try params.append(p.a, try p.new(Pattern, .{ .ident = base }));
+            // Unpack only the accumulators the body reads, so Roc does not
+            // warn about the others.
+            var pfields: std.ArrayList(PField) = .empty;
+            for (names.items) |n| if (readsName(body_toks, n)) try pfields.append(p.a, .{ .name = n, .pat = null });
+            if (pfields.items.len < names.items.len) try pfields.append(p.a, .{ .name = "..", .pat = null });
+            const unpack: Stmt = .{
+                .comments = &.{},
+                .blank_before = false,
+                .kind = .{ .def = .{
+                    .pat = try p.new(Pattern, .{ .record = pfields.items }),
+                    .body = try p.new(Block, .{ .stmts = &.{}, .result = try p.new(Expr, .{ .ident = base }) }),
+                } },
+            };
+            var stmts: std.ArrayList(Stmt) = .empty;
+            if (pfields.items.len > 0) try stmts.append(p.a, unpack);
+            try stmts.appendSlice(p.a, body.stmts);
+            const result = body.result orelse return p.errAt(kw, "the body of this fold must end with the new accumulators, like '{{ total = total + x }}'", .{});
+            lambda_body = try p.new(Block, .{
+                .stmts = stmts.items,
+                .result = try p.fillFoldRecords(result, base, names.items, kw),
+                .result_blank_before = body.result_blank_before,
+            });
+            start = try p.new(Expr, .{ .record = .{ .base = null, .fields = inits.items } });
+        }
+        const lambda = try p.new(Expr, .{ .lambda = .{ .params = params.items, .body = lambda_body } });
+        var args: std.ArrayList(*Expr) = .empty;
+        try args.append(p.a, try p.new(Expr, .{ .paren = lambda }));
+        try args.append(p.a, start);
+        try args.append(p.a, iter);
+        const func = try p.new(Expr, .{ .ident = "List.fold" });
+        return p.new(Expr, .{ .app = .{ .func = func, .args = args.items } });
+    }
+
+    /// Whether `name` is read somewhere in `toks`: as a name that is not
+    /// followed by `=` (which would make it a field or a definition).
+    fn readsName(toks: []const Token, name: []const u8) bool {
+        for (toks, 0..) |t, i| {
+            if (t.tag != .lower or !std.mem.eql(u8, t.text, name)) continue;
+            if (i + 1 < toks.len and toks[i + 1].tag == .equals) continue;
+            return true;
+        }
+        return false;
+    }
+
+    /// Turns the records the body of a multi-accumulator fold ends with into
+    /// updates of the current accumulators: `{ total = t }` becomes
+    /// `{ punkFold1 | total = t }`, and `{}` the accumulators unchanged.
+    fn fillFoldRecords(p: *Parser, e: *Expr, base: []const u8, names: []const []const u8, kw: Token) Error!*Expr {
+        switch (e.*) {
+            .record => |r| if (r.base == null) {
+                for (r.fields) |f| {
+                    var known = false;
+                    for (names) |n| known = known or std.mem.eql(u8, n, f.name);
+                    if (!known) return p.errAt(kw, "'{s}' is not an accumulator of this fold", .{f.name});
+                }
+                const b = try p.new(Expr, .{ .ident = base });
+                if (r.fields.len == 0) return b;
+                return p.new(Expr, .{ .record = .{ .base = b, .fields = r.fields } });
+            },
+            .paren => |inner| e.* = .{ .paren = try p.fillFoldRecords(inner, base, names, kw) },
+            .if_ => |i| {
+                if (i.then.result) |r| i.then.result = try p.fillFoldRecords(r, base, names, kw);
+                if (i.else_) |el| if (el.result) |r| {
+                    el.result = try p.fillFoldRecords(r, base, names, kw);
+                };
+            },
+            .case => |c| for (c.arms) |arm| if (arm.body.result) |r| {
+                arm.body.result = try p.fillFoldRecords(r, base, names, kw);
+            },
+            else => {},
+        }
+        return e;
     }
 
     fn parseLambda(p: *Parser) Error!*Expr {
@@ -1244,7 +1405,7 @@ const Parser = struct {
             var args: std.ArrayList(*Pattern) = .empty;
             while (!p.atStop() and switch (p.tok().tag) {
                 .lower, .upper, .int, .float, .string, .char, .lparen, .lbrack, .lbrace, .underscore => true,
-                .qlower, .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
+                .qlower, .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
             }) try args.append(p.a, try p.parsePatternAtom());
             return p.new(Pattern, .{ .tag = .{ .name = name, .args = args.items } });
         }
@@ -1342,7 +1503,7 @@ const Parser = struct {
                 _ = try p.expect(.rbrace, "'}' or ','");
                 return p.new(Pattern, .{ .record = fields.items });
             },
-            .qlower, .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => {},
+            .qlower, .rparen, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => {},
         }
         return p.errAt(t, "expected a pattern but found '{s}'", .{describe(t)});
     }
@@ -1421,7 +1582,7 @@ const Parser = struct {
         if (p.atStop()) return false;
         return switch (p.tok().tag) {
             .lower, .upper, .lparen, .lbrace, .underscore => true,
-            .qlower, .int, .float, .string, .char, .rparen, .lbrack, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
+            .qlower, .int, .float, .string, .char, .rparen, .lbrack, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => false,
         };
     }
 
@@ -1509,7 +1670,7 @@ const Parser = struct {
                 _ = try p.expect(.rbrace, "'}' or ','");
                 return p.new(Type, .{ .record = .{ .fields = fields.items, .ext = ext } });
             },
-            .qlower, .int, .float, .string, .char, .rparen, .lbrack, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => {},
+            .qlower, .int, .float, .string, .char, .rparen, .lbrack, .rbrack, .rbrace, .comma, .colon, .equals, .arrow, .fat_arrow, .bar, .dot_field, .double_dot, .op, .question, .kw_fn, .kw_if, .kw_then, .kw_else, .kw_case, .kw_of, .kw_type, .kw_alias, .kw_var, .kw_for, .kw_in, .kw_while, .kw_fold, .kw_into, .kw_with, .kw_return, .kw_crash, .kw_dbg, .kw_expect, .kw_as, .kw_header, .eof => {},
         }
         return p.errAt(t, "expected a type but found '{s}'", .{describe(t)});
     }
@@ -1552,7 +1713,6 @@ const Emitter = struct {
     diag: *Diagnostic,
     buf: std.ArrayList(u8) = .empty,
     indent: u32 = 0,
-    vars: std.ArrayList([]const u8) = .empty,
     /// Names in scope, innermost last, with the arity of the function they
     /// hold when the emitter knows it (null: not a known function).
     scope: std.ArrayList(Binding) = .empty,
@@ -1840,8 +2000,6 @@ const Emitter = struct {
     /// Writes each statement on its own line, one level deeper. The caller
     /// writes the braces.
     fn emitBlockLines(e: *Emitter, b: *Block) Error!void {
-        const vars_mark = e.vars.items.len;
-        defer e.vars.items.len = vars_mark;
         const scope_mark = e.scope.items.len;
         defer e.scope.items.len = scope_mark;
         e.indent += 1;
@@ -1868,40 +2026,11 @@ const Emitter = struct {
                 try e.bindDef(d.pat, d.body);
                 try e.emitDef(d.pat, d.body);
             },
-            .var_def => |v| {
-                const name = try snake(e.a, v.name);
-                try e.w("var $");
-                try e.w(name);
-                try e.w(" = ");
-                try e.emitBody(v.body);
-                try e.vars.append(e.a, name);
-            },
             .anno => |an| {
                 try e.scope.append(e.a, .{ .name = try snake(e.a, an.name), .arity = typeArity(an.ty), .anno = true });
                 try e.w(try snake(e.a, an.name));
                 try e.w(" : ");
                 try e.emitType(an.ty, false);
-            },
-            .for_ => |f| {
-                try e.w("for ");
-                try e.emitPattern(f.pat);
-                try e.w(" in ");
-                try e.emitExpr(f.iter);
-                const scope_mark = e.scope.items.len;
-                defer e.scope.items.len = scope_mark;
-                try e.bindPattern(f.pat);
-                try e.w(" {");
-                try e.emitBlockLines(f.body);
-                try e.nl();
-                try e.w("}");
-            },
-            .while_ => |wh| {
-                try e.w("while ");
-                try e.emitExpr(wh.cond);
-                try e.w(" {");
-                try e.emitBlockLines(wh.body);
-                try e.nl();
-                try e.w("}");
             },
             .expect => |b| {
                 try e.w("expect ");
@@ -1913,19 +2042,9 @@ const Emitter = struct {
 
     // expressions
 
-    fn isVar(e: *Emitter, name: []const u8) bool {
-        var i = e.vars.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (std.mem.eql(u8, e.vars.items[i], name)) return true;
-        }
-        return false;
-    }
-
     fn emitIdent(e: *Emitter, raw: []const u8) Error!void {
         try e.checkExposed(raw);
         const name = stdlib.rocName(try snakeQualified(e.a, raw));
-        if (e.isVar(name)) try e.w("$");
         try e.w(name);
     }
 
@@ -2806,6 +2925,11 @@ const Emitter = struct {
                 try e.w("{ ");
                 for (fields, 0..) |f, i| {
                     if (i > 0) try e.w(", ");
+                    // `..` only comes from folds, which unpack some of the accumulators
+                    if (std.mem.eql(u8, f.name, "..")) {
+                        try e.w("..");
+                        continue;
+                    }
                     try e.w(try snake(e.a, f.name));
                     if (f.pat) |sub| {
                         try e.w(": ");
