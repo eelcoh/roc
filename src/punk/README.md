@@ -49,7 +49,15 @@ When the module declares `type Shape` with the module's own name, that type
 carries the block (`Shape := [Circle(F64), ...].{ area = ... }`). See
 `examples/punk/imports/` and "Roc compatibility" below.
 
-A syntax error in a `.punk` file is printed as `file:line:col: message`.
+A syntax error in a `.punk` file is reported like the compiler's own errors:
+
+```
+── ✗ syntax error ──────────────────────────────────────────────────────────────
+
+There is a syntax error in examples/punk/app.punk, line 3, column 1.
+
+expected an expression but found 'end of file'
+```
 
 ## Without the compiler
 
@@ -82,7 +90,7 @@ named function). `Dict.fold` passes key, value, state. Both orders then fit
 text                                    List.map_try(
     |> Str.trim                             Str.split_on(Str.trim(text), ","),
     |> Str.splitOn ","                      parse_range,
-    |> List.mapTry parseRange?          )?
+    |> try List.mapTry parseRange       )?
 ```
 
 `Result.map`, `Result.mapError` and `Result.withDefault` are Roc's
@@ -113,7 +121,7 @@ applications as lambdas. It knows the arity of the builtins above and of every
 function defined or annotated in the same file or in an imported module (see
 below). Arguments of a partial application that are not plain values are
 computed once, before the lambda. Calls to functions it knows nothing about
-(lambda parameters, record fields, modules of URL packages) pass all
+(lambda parameters, record fields) pass all
 arguments at once, as in Roc; partial application of those does not work.
 See `examples/punk/currying.punk`.
 
@@ -175,14 +183,40 @@ argument order they have in punkroc, and curried types are Roc's multi-
 argument functions (`add : I64 -> I64 -> I64` is `Math.add(1, 2)`). Roc does
 not check punkroc's `exposing` list: from Roc, everything is visible.
 
-**What punkroc cannot read.** Modules of packages given by URL are not on
-disk when the translator runs. Their functions take Roc's order and all their
-arguments at once, as in Roc. The switch `rotate_roc_modules` in
-`translate.zig` turns the reordering for Roc modules off.
+**Packages given by URL.** Their modules are Roc modules too, and get the
+same treatment: `w: "https://.../Hs2w....tar.zst"` in the app header and
+`import w.Wrap` make `"hi" |> Wrap.surround "<" ">"` and
+`List.map (Wrap.surround "(" ")")` work. The translator reads the package
+from Roc's package cache (`~/.cache/roc/packages/<hash>/`); when it is not
+there yet, the compiler downloads it first, as it would right after anyway.
+This works for the app file the compiler builds or checks; with
+`--replace-dep`, or in `punk2roc`, which only translates a file, URL packages
+keep Roc's order and take all their arguments at once.
+
+The switch `rotate_roc_modules` in `translate.zig` turns the reordering for
+Roc modules off.
 
 `examples/punk/imports/` has all three directions: `app.punk` uses the
 punkroc modules `Math` and `Shape`, the Roc module `Text.roc`, and
 `Report.roc`, a Roc module that uses `Math.punk`.
+
+## `try` instead of `?`
+
+A call that may stop the function with an `Err` starts with the word `try`,
+so the early exit is visible at the front of the line instead of hidden in a
+trailing `?`:
+
+```
+-- punkroc                              # Roc
+x = try U64.fromStr a                   x = U64.from_str(a)?
+Ok (try parse a, try parse b)           Ok((parse(a)?, parse(b)?))
+input |> try List.mapTry parseRange     List.map_try(input, parse_range)?
+```
+
+`try` takes one call with its arguments (`try f a + 1` is `(try f a) + 1`);
+use parentheses for more: `try (s |> Str.trim |> parse)`. In a pipeline
+`|> try f a` checks the result after piping. A postfix `?` is a syntax error
+that points to `try`.
 
 ## Smaller Elm habits
 

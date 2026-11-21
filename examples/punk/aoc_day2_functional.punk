@@ -17,8 +17,8 @@ main! = fn () ->
         Err _ -> {}
 
 run! = fn () ->
-    part1Demo = solve part1Divisors demoInput?
-    part2Demo = solve properDivisors demoInput?
+    part1Demo = try solve part1Divisors demoInput
+    part2Demo = try solve properDivisors demoInput
     Stdout.line! "Part 1 (demo): ${U64.toStr part1Demo}"
     Stdout.line! "Part 2 (demo): ${U64.toStr part2Demo}"
     Ok {}
@@ -32,7 +32,7 @@ solve = fn divisorsFor, input ->
         input
             |> Str.trim
             |> Str.splitOn ","
-            |> List.mapTry parseRange?
+            |> try List.mapTry parseRange
 
     ranges
         |> List.joinMap splitByDigitCount
@@ -45,7 +45,7 @@ solve = fn divisorsFor, input ->
 parseRange : Str -> Try (U64, U64) _
 parseRange = fn rangeStr ->
     case Str.splitOn "-" rangeStr of
-        [a, b] -> Ok (U64.fromStr a?, U64.fromStr b?)
+        [a, b] -> Ok (try U64.fromStr a, try U64.fromStr b)
         _ -> Err InvalidRangeFormat
 
 -- Split a range into sub-ranges where all numbers have the same digit count

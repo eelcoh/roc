@@ -3,7 +3,6 @@
 //! ordinary Roc.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const translate_mod = @import("translate.zig");
 const interface = @import("interface.zig");
 
@@ -26,13 +25,64 @@ pub fn isPunkPath(path: []const u8) bool {
 pub const Reader = struct {
     ctx: ?*anyopaque,
     read: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) ?[]u8,
+    /// The directory a package given by URL is in on disk, downloading it
+    /// first when it is not there yet. Null (the function, or its answer)
+    /// leaves the package's modules unread.
+    packageDir: ?*const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, url: []const u8) ?[]const u8 = null,
+};
+
+/// Finds the directory of URL packages for `Reader.packageDir`.
+pub const PackageFinder = struct {
+    ctx: ?*anyopaque,
+    dir: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, url: []const u8) ?[]const u8,
 };
 
 /// Translate the punkroc source of `path` to Roc source owned by `allocator`.
-/// A syntax error is printed to stderr as `path:line:col: message`, and
-/// `error.ParseError` returned.
+/// On a syntax error `error.ParseError` is returned, and `syntaxError(path)`
+/// tells what it was.
 pub fn toRoc(allocator: std.mem.Allocator, path: []const u8, src: []const u8) Error![]u8 {
     return toRocWith(allocator, path, src, null);
+}
+
+/// The syntax errors of the `.punk` files translated last, by path, as
+/// `path:line:col: message`, so the compiler can report them like its own.
+/// The compiler reads files from several threads.
+const syntax_errors = struct {
+    var mutex: std.atomic.Mutex = .unlocked;
+    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const gpa = std.heap.page_allocator;
+
+    fn lock() void {
+        while (!mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn set(path: []const u8, message: ?[]const u8) void {
+        lock();
+        defer mutex.unlock();
+        if (map.fetchRemove(path)) |old| {
+            gpa.free(old.key);
+            gpa.free(old.value);
+        }
+        const msg = message orelse return;
+        const key = gpa.dupe(u8, path) catch return;
+        const value = gpa.dupe(u8, msg) catch {
+            gpa.free(key);
+            return;
+        };
+        map.put(gpa, key, value) catch {
+            gpa.free(key);
+            gpa.free(value);
+        };
+    }
+};
+
+/// The syntax error that stopped the last translation of `path`, as
+/// `path:line:col: message`, owned by `allocator`. Null when there was none.
+pub fn syntaxError(allocator: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error!?[]u8 {
+    syntax_errors.lock();
+    defer syntax_errors.mutex.unlock();
+    const msg = syntax_errors.map.get(path) orelse return null;
+    return try allocator.dupe(u8, msg);
 }
 
 /// Like `toRoc`, but reads the modules `path` imports with `reader`, so
@@ -50,14 +100,13 @@ pub fn toRocWith(allocator: std.mem.Allocator, path: []const u8, src: []const u8
     }
     const roc = translate_mod.translateWith(arena.allocator(), src, &diag, resolver) catch |err| switch (err) {
         error.ParseError => {
-            // Freestanding targets (the wasm REPL and playground) have no stderr.
-            if (comptime builtin.os.tag != .freestanding) {
-                std.debug.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
-            }
+            const msg = try std.fmt.allocPrint(arena.allocator(), "{s}:{d}:{d}: {s}", .{ path, diag.line, diag.col, diag.message });
+            syntax_errors.set(path, msg);
             return error.ParseError;
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
+    syntax_errors.set(path, null);
     return allocator.dupe(u8, roc);
 }
 
@@ -70,12 +119,15 @@ fn load(ctx_ptr: ?*anyopaque, arena: std.mem.Allocator, imp: translate_mod.Impor
 
 /// Finds an imported module next to the importing file, or in the directory
 /// of a package whose path the app header gives (`pf: platform "../pf/main.roc"`).
-/// `Foo.roc` wins over `Foo.punk`, as in the compiler. Packages given by URL
-/// are not looked up.
+/// `Foo.roc` wins over `Foo.punk`, as in the compiler. A package given by URL
+/// is looked up where `reader.packageDir` says it is.
 pub fn loadFrom(reader: Reader, dir: []const u8, arena: std.mem.Allocator, imp: translate_mod.Import) Error!?*const Interface {
     const base = if (imp.package != null) blk: {
         const pkg = imp.package_path orelse return null;
-        if (std.mem.find(u8, pkg, "://") != null) return null;
+        if (std.mem.find(u8, pkg, "://") != null) {
+            const find = reader.packageDir orelse return null;
+            break :blk find(reader.ctx, arena, pkg) orelse return null;
+        }
         const main = if (std.fs.path.isAbsolute(pkg)) pkg else try std.fs.path.join(arena, &.{ dir, pkg });
         break :blk std.fs.path.dirname(main) orelse ".";
     } else dir;

@@ -141,6 +141,28 @@ fn freeConstSlice(gpa: Allocator, s: []const u8) void {
     gpa.free(@constCast(s));
 }
 
+/// punkroc: the report for a syntax error in the `.punk` file `path`, when
+/// that is why reading it failed. The translator finds these, not the Roc
+/// parser, so they have no source region; the headline names the position.
+pub fn punkSyntaxReport(gpa: Allocator, path: []const u8) Allocator.Error!?Report {
+    const full = (try CoreCtx.punkSyntaxError(gpa, path)) orelse return null;
+    defer gpa.free(full);
+    // `full` is `path:line:col: message`.
+    const rest = if (std.mem.startsWith(u8, full, path)) full[path.len..] else full;
+    const split = std.mem.find(u8, rest, ": ") orelse rest.len;
+    const message = if (split + 2 <= rest.len) rest[split + 2 ..] else "";
+    var position = std.mem.splitScalar(u8, rest[0..split], ':');
+    _ = position.next();
+    const line = position.next() orelse "?";
+    const col = position.next() orelse "?";
+    const after = try std.fmt.allocPrint(gpa, ", line {s}, column {s}.", .{ line, col });
+    defer gpa.free(after);
+    var report = try Report.initWithPath(gpa, "Syntax Error", "There is a syntax error in ", path, after, .fatal);
+    errdefer report.deinit();
+    try report.document.addReflowingText(message);
+    return report;
+}
+
 /// The roc cache directory for downloaded packages:
 /// - Linux/macOS: ~/.cache/roc/packages/ (respects XDG_CACHE_HOME if set)
 /// - Windows: %LOCALAPPDATA%\roc\packages\
@@ -1597,6 +1619,7 @@ pub const BuildEnv = struct {
                 error.OutOfMemory,
                 error.StreamTooLong,
                 => {
+                    if (try punkSyntaxReport(self.gpa, file_abs)) |report| break :blk report;
                     var other_report = try Report.initWithPath(self.gpa, "Could Not Read File", "I could not read the file ", file_abs, ".", .fatal);
                     try other_report.document.addText("I did get the following error: ");
                     try other_report.addErrorMessage(@errorName(err));
@@ -1770,7 +1793,11 @@ pub const BuildEnv = struct {
     /// source is digested here, once.
     fn readSourceFile(self: *BuildEnv, path: []const u8) (Allocator.Error || error{ FileNotFound, AccessDenied, StreamTooLong, IoError })!SourceRead {
         const allocator = Coordinator.workerAllocatorFor(self.gpa, self.mode);
-        const data = self.filesystem.readFile(path, allocator) catch |err| switch (err) {
+        // punkroc: the translator of a `.punk` app reads the modules it
+        // imports from URL packages, so it can find them here.
+        var fs = self.filesystem;
+        fs.punk_packages = .{ .ctx = self, .dir = punkPackageDir };
+        const data = fs.readFile(path, allocator) catch |err| switch (err) {
             error.FileNotFound => return error.FileNotFound,
             error.AccessDenied => return error.AccessDenied,
             error.StreamTooLong => return error.StreamTooLong,
@@ -1788,6 +1815,30 @@ pub const BuildEnv = struct {
             .digest = digested.digest,
             .file_state = if (digested.file_digest) |file_digest| watch_inputs.fileState(file_digest) else null,
         };
+    }
+
+    /// punkroc: the directory of the package at `url`, for the translator of
+    /// a `.punk` app. The package is downloaded into the package cache when it
+    /// is not there yet, as package resolution would do right after; the
+    /// download is the same, so resolution then finds it cached. Any problem
+    /// gives null: resolution reports it properly.
+    fn punkPackageDir(ctx: ?*anyopaque, allocator: Allocator, url: []const u8) ?[]const u8 {
+        const self: *BuildEnv = @ptrCast(@alignCast(ctx.?));
+        // A replaced dependency need not be downloaded at all.
+        if (self.resolution_config.replace_deps.len > 0) return null;
+        const parsed = base.url.parseUrlPath(url) catch return null;
+        self.ensurePackageCacheDir() catch return null;
+        var ctx_fetcher = self.resolutionFetcher();
+        const fetcher = ctx_fetcher.fetcher();
+        var reports = package_resolution.HeaderReports.init(allocator);
+        defer {
+            for (reports.items) |*report| report.deinit();
+            reports.deinit();
+        }
+        // The largest limit resolution applies; it checks the real one.
+        const limit = self.resolution_config.max_platform_transitive_expanded_bytes;
+        const fetched = fetcher.fetchUrlFn(fetcher.ctx, allocator, url, parsed.hash, limit, &reports) catch return null;
+        return fetched.root_dir;
     }
 
     fn currentFileWatchState(self: *BuildEnv, path: []const u8) Allocator.Error!watch_inputs.State {

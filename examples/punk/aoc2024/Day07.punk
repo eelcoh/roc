@@ -31,8 +31,8 @@ parseEquation = fn line ->
     case Str.splitOn ": " line of
         [target, numbers] ->
             Ok
-                { target = U64.fromStr target?
-                , numbers = numbers |> Str.splitOn " " |> List.mapTry U64.fromStr?
+                { target = try U64.fromStr target
+                , numbers = numbers |> Str.splitOn " " |> try List.mapTry U64.fromStr
                 }
         _ -> Err (BadLine line)
 

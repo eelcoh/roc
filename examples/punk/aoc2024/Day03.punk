@@ -26,7 +26,7 @@ parseMul = fn chunk ->
     case Str.splitOn ")" chunk of
         [args, ..] ->
             case Str.splitOn "," args of
-                [x, y] -> Ok (number x? * number y?)
+                [x, y] -> Ok (try number x * try number y)
                 _ -> Err NotAMul
         _ -> Err NotAMul
 

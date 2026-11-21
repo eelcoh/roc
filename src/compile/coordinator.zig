@@ -7083,6 +7083,13 @@ pub const Coordinator = struct {
             },
             .type_check => "Type Checking Failed",
         };
+        // punkroc: a `.punk` file that does not translate failed to read.
+        if (failure.cause == .read_source) {
+            if (try compile_build.punkSyntaxReport(self.gpa, mod.path)) |report| {
+                try appendReportOwned(self.gpa, &mod.reports, report);
+                return operation_error;
+            }
+        }
         const after = try std.fmt.allocPrint(self.gpa, ": {s}.", .{@errorName(operation_error)});
         defer self.gpa.free(after);
         const report = try Report.initWithPath(self.gpa, title, "", mod.path, after, .fatal);

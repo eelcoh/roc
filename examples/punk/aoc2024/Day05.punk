@@ -53,12 +53,12 @@ parse = fn input ->
             rules =
                 rulesPart
                     |> Str.splitOn "\n"
-                    |> List.mapTry parseRule?
+                    |> try List.mapTry parseRule
                     |> Set.fromList
             updates =
                 updatesPart
                     |> Str.splitOn "\n"
-                    |> List.mapTry (fn line -> line |> Str.splitOn "," |> List.mapTry U64.fromStr)?
+                    |> try List.mapTry (fn line -> line |> Str.splitOn "," |> List.mapTry U64.fromStr)
             Ok { rules = rules, updates = updates }
         _ ->
             Err MissingBlankLine
@@ -66,7 +66,7 @@ parse = fn input ->
 parseRule : Str -> Result (U64, U64) _
 parseRule = fn line ->
     case Str.splitOn "|" line of
-        [before, after] -> Ok (U64.fromStr before?, U64.fromStr after?)
+        [before, after] -> Ok (try U64.fromStr before, try U64.fromStr after)
         _ -> Err (BadRule line)
 
 compare : Rules -> U64 -> U64 -> (LT | EQ | GT)

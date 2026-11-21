@@ -3248,7 +3248,8 @@ fn stageDefaultApp(
         const reader: punk.Reader = .{ .ctx = ctx, .read = readRawForPunk };
         break :blk punk.toRocWith(ctx.gpa, file_path, raw_source, reader) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ParseError => return error.CliError,
+            // The build reads the file again and reports the syntax error.
+            error.ParseError => return null,
         };
     } else raw_source;
     defer ctx.gpa.free(source);

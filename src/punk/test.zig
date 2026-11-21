@@ -87,7 +87,7 @@ test "pipes pass the value last" {
         \\    input
         \\    |> List.keepIf isGood
         \\
-        \\ranges = text |> List.mapTry parseRange?
+        \\ranges = text |> try List.mapTry parseRange
         \\
         \\line = name |> greet "Hello"
         \\back = greet "Hi" <| name
@@ -336,7 +336,7 @@ test "comments, headers, effects, try" {
         \\-}
         \\main! = fn args ->
         \\    -- greet everyone
-        \\    name = List.first args?
+        \\    name = try List.first args
         \\    Stdout.line! "Hello, ${name}!"
         \\    Ok {}
     ,
@@ -355,10 +355,10 @@ test "comments, headers, effects, try" {
     );
 }
 
-test "postfix try binds to the whole call" {
+test "try binds to the whole call" {
     try check(
         \\f = fn a ->
-        \\    x = U64.fromStr a?
+        \\    x = try U64.fromStr a
         \\    Ok x
     ,
         \\f = |a| {
@@ -367,6 +367,38 @@ test "postfix try binds to the whole call" {
         \\}
         \\
     );
+}
+
+test "try inside tuples, operators and pipelines" {
+    try check(
+        \\pair = fn a, b -> Ok (try parse a, try parse b)
+        \\
+        \\product = fn x, y -> Ok (try number x * try number y)
+        \\
+        \\ranges = fn input ->
+        \\    input
+        \\        |> Str.trim
+        \\        |> Str.splitOn ","
+        \\        |> try List.mapTry parseRange
+        \\        |> List.len
+        \\        |> Ok
+        \\
+        \\whole = fn s -> try (s |> Str.trim |> parse)
+    ,
+        \\pair = |a, b| Ok((parse(a)?, parse(b)?))
+        \\
+        \\product = |x, y| Ok(number(x)? * number(y)?)
+        \\
+        \\ranges = |input| Ok(List.len(List.map_try(Str.split_on(Str.trim(input), ","), parse_range)?))
+        \\
+        \\whole = |s| parse(Str.trim(s))?
+        \\
+    );
+}
+
+test "a postfix ? points to try" {
+    try checkError("f = fn a ->\n    x = U64.fromStr a?\n    Ok x\n", 2, "'try f x' instead of 'f x?'");
+    try checkError("f = fn a -> g try a\n", 1, "unexpected");
 }
 
 test "operators" {
@@ -612,9 +644,19 @@ const Files = struct {
     fn read(ctx: ?*anyopaque, a: std.mem.Allocator, path: []const u8) ?[]u8 {
         const fs: *const Files = @ptrCast(@alignCast(ctx.?));
         for (fs.entries) |entry| {
-            if (std.mem.eql(u8, entry[0], path)) return a.dupe(u8, entry[1]) catch null;
+            if (samePath(entry[0], path)) return a.dupe(u8, entry[1]) catch null;
         }
         return null;
+    }
+
+    /// Paths are joined with `\\` on Windows; the entries use `/`.
+    fn samePath(entry: []const u8, path: []const u8) bool {
+        if (entry.len != path.len) return false;
+        for (entry, path) |e, p| {
+            const same = e == p or (e == '/' and std.fs.path.isSep(p));
+            if (!same) return false;
+        }
+        return true;
     }
 };
 
@@ -660,6 +702,13 @@ const files = Files{ .entries = &.{
         \\
         \\    greeting : Str
         \\    greeting = "hi"
+        \\}
+    },
+    .{
+        "cache/AbC123/Wrap.roc",
+        \\Wrap := [].{
+        \\    surround : Str, Str, Str -> Str
+        \\    surround = |s, l, r| s
         \\}
     },
     .{
@@ -746,6 +795,55 @@ test "modules: Roc modules take their arguments in Roc's order" {
         \\}
         \\
     );
+}
+
+/// Where the test's URL packages are; the compiler downloads them.
+fn testPackageDir(_: ?*anyopaque, _: std.mem.Allocator, url: []const u8) ?[]const u8 {
+    return if (std.mem.endsWith(u8, url, "/AbC123.tar.zst")) "cache/AbC123" else null;
+}
+
+test "modules: modules of URL packages are read where the package is" {
+    const src =
+        \\app [main!] { pf: platform "../pf/main.roc", w: "https://example.com/AbC123.tar.zst" }
+        \\
+        \\import w.Wrap
+        \\
+        \\quoted = "hi" |> Wrap.surround "<" ">"
+        \\wrap = Wrap.surround "(" ")"
+        \\
+    ;
+    const reader = mod.Reader{ .ctx = @ptrCast(@constCast(&files)), .read = Files.read, .packageDir = testPackageDir };
+    const out = try mod.toRocWith(std.testing.allocator, "app/main.punk", src, reader);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings(
+        \\app [main!] { pf: platform "../pf/main.roc", w: "https://example.com/AbC123.tar.zst" }
+        \\
+        \\import w.Wrap
+        \\
+        \\quoted = Wrap.surround("hi", "<", ">")
+        \\wrap = |punk_a1| Wrap.surround(punk_a1, "(", ")")
+        \\
+    , out);
+    // Without a way to find the package, its functions keep Roc's order.
+    try checkWith(src,
+        \\app [main!] { pf: platform "../pf/main.roc", w: "https://example.com/AbC123.tar.zst" }
+        \\
+        \\import w.Wrap
+        \\
+        \\quoted = Wrap.surround("<", ">", "hi")
+        \\wrap = Wrap.surround("(", ")")
+        \\
+    );
+}
+
+test "syntax errors are kept for the compiler to report" {
+    try std.testing.expectError(error.ParseError, mod.toRoc(std.testing.allocator, "bad.punk", "x = (1 +\n"));
+    const msg = (try mod.syntaxError(std.testing.allocator, "bad.punk")).?;
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.startsWith(u8, msg, "bad.punk:2:1: "));
+    const out = try mod.toRoc(std.testing.allocator, "bad.punk", "x = 1\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(null, try mod.syntaxError(std.testing.allocator, "bad.punk"));
 }
 
 test "modules: names an import exposes unqualified" {
