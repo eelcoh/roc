@@ -462,7 +462,7 @@ pub const ModuleType = enum {
             },
             .compile => .{
                 .root = "src/compile/mod.zig",
-                .deps = &.{ .tracy, .build_options, .ctx, .builtins, .collections, .base, .types, .parse, .can, .check, .reporting, .layout, .static_data, .eval, .unbundle, .roc_target, .backend, .lir, .symbol, .sljmp },
+                .deps = &.{ .tracy, .build_options, .ctx, .builtins, .collections, .base, .types, .parse, .can, .check, .reporting, .layout, .static_data, .eval, .unbundle, .roc_target, .backend, .lir, .symbol, .sljmp, .punk },
                 .extra_imports = &.{"compiler_platform_sources"},
                 .tests = .{ .unit = .{ .aggregators = &.{"compile tests"} } },
             },

@@ -98,16 +98,187 @@ pub fn toRocWith(allocator: std.mem.Allocator, path: []const u8, src: []const u8
         load_ctx = .{ .reader = r, .dir = std.fs.path.dirname(path) orelse "." };
         resolver = .{ .ctx = &load_ctx, .load = load };
     }
-    const roc = translate_mod.translateWith(arena.allocator(), src, &diag, resolver) catch |err| switch (err) {
+    const mapped = translate_mod.translateMapped(arena.allocator(), src, &diag, resolver) catch |err| switch (err) {
         error.ParseError => {
             const msg = try std.fmt.allocPrint(arena.allocator(), "{s}:{d}:{d}: {s}", .{ path, diag.line, diag.col, diag.message });
             syntax_errors.set(path, msg);
+            // Kept so the report can show the line.
+            source_maps.set(path, src, "", &.{});
             return error.ParseError;
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
     syntax_errors.set(path, null);
-    return allocator.dupe(u8, roc);
+    source_maps.set(path, src, mapped.roc, mapped.marks);
+    return allocator.dupe(u8, mapped.roc);
+}
+
+/// The source maps of the `.punk` files translated last, by path, so the
+/// compiler's error messages can show the `.punk` file instead of its Roc
+/// translation (see `remap`).
+const source_maps = struct {
+    const Entry = struct { punk: []const u8, punk_lines: []const u32, roc_lines: []const u32, marks: []const translate_mod.Mark };
+    var mutex: std.atomic.Mutex = .unlocked;
+    var map: std.StringHashMapUnmanaged(Entry) = .empty;
+    const gpa = std.heap.page_allocator;
+
+    fn lock() void {
+        while (!mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn free(e: Entry) void {
+        gpa.free(e.punk);
+        gpa.free(e.punk_lines);
+        gpa.free(e.roc_lines);
+        gpa.free(e.marks);
+    }
+
+    fn set(path: []const u8, punk: []const u8, roc: []const u8, marks: []const translate_mod.Mark) void {
+        const entry = make(punk, roc, marks) catch return;
+        lock();
+        defer mutex.unlock();
+        if (map.getPtr(path)) |old| {
+            free(old.*);
+            old.* = entry;
+            return;
+        }
+        const key = gpa.dupe(u8, path) catch return free(entry);
+        map.put(gpa, key, entry) catch {
+            gpa.free(key);
+            free(entry);
+        };
+    }
+
+    fn make(punk: []const u8, roc: []const u8, marks: []const translate_mod.Mark) !Entry {
+        const p = try gpa.dupe(u8, punk);
+        errdefer gpa.free(p);
+        const pl = try lineStarts(punk);
+        errdefer gpa.free(pl);
+        const rl = try lineStarts(roc);
+        errdefer gpa.free(rl);
+        return .{ .punk = p, .punk_lines = pl, .roc_lines = rl, .marks = try gpa.dupe(translate_mod.Mark, marks) };
+    }
+
+    fn lineStarts(text: []const u8) ![]u32 {
+        var list: std.ArrayList(u32) = .empty;
+        errdefer list.deinit(gpa);
+        try list.append(gpa, 0);
+        for (text, 0..) |c, i| if (c == '\n') try list.append(gpa, @intCast(i + 1));
+        return list.toOwnedSlice(gpa);
+    }
+};
+
+/// A position in a file: line and column, both counted from 1.
+pub const Position = struct { line: u32, column: u32 };
+
+/// A part of a `.punk` file, for an error message.
+pub const SourceRegion = struct {
+    start: Position,
+    end: Position,
+    /// The whole lines `start` to `end` are on, owned by the caller.
+    lines: []u8,
+};
+
+/// The part of the `.punk` file `path` that the part `start`..`end` of its
+/// Roc translation came from. Null when `path` is not a translated `.punk`
+/// file. The compiler reports errors in the translation; this turns them
+/// into errors in the file the programmer wrote.
+pub fn remap(allocator: std.mem.Allocator, path: []const u8, start: Position, end: Position) std.mem.Allocator.Error!?SourceRegion {
+    source_maps.lock();
+    defer source_maps.mutex.unlock();
+    const e = source_maps.map.get(path) orelse return null;
+    // A file that did not translate has no translation to point into.
+    if (e.marks.len == 0) return null;
+    const s = offsetOf(e.roc_lines, start);
+    const t = @max(offsetOf(e.roc_lines, end), s);
+    const span = translate_mod.sourceSpan(e.marks, s, t);
+    const ps = positionOf(e.punk_lines, span.start);
+    const pe = positionOf(e.punk_lines, span.end);
+    const from = e.punk_lines[ps.line - 1];
+    var to: usize = if (pe.line < e.punk_lines.len) e.punk_lines[pe.line] - 1 else e.punk.len;
+    if (to > from and e.punk[to - 1] == '\r') to -= 1;
+    return .{ .start = ps, .end = pe, .lines = try allocator.dupe(u8, e.punk[from..@max(to, from)]) };
+}
+
+/// The lines `first` to `last` (from 1, `last` clamped to the end) of the
+/// `.punk` file `path`, owned by the caller. Null when `path` is not known
+/// or has no line `first`.
+pub fn sourceLines(allocator: std.mem.Allocator, path: []const u8, first: u32, last: u32) std.mem.Allocator.Error!?[]u8 {
+    source_maps.lock();
+    defer source_maps.mutex.unlock();
+    const e = source_maps.map.get(path) orelse return null;
+    const lines = e.punk_lines;
+    if (first > lines.len) return null;
+    const f = @max(first, 1) - 1;
+    const l = @min(@max(last, first), lines.len);
+    var to: usize = if (l < lines.len) lines[l] - 1 else e.punk.len;
+    if (to > lines[f] and e.punk[to - 1] == '\r') to -= 1;
+    return try allocator.dupe(u8, e.punk[lines[f]..@max(to, lines[f])]);
+}
+
+/// `text` from an error message with the Roc spelling of names turned back
+/// into punkroc's (`not_defined` is `notDefined`, `List.keep_if` is
+/// `List.keepIf`), owned by `allocator`. Null when nothing changes. Words
+/// with a `/` in them (paths) and names starting with `_` stay as they are.
+pub fn camelText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error!?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var changed = false;
+    var word_start: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == ' ' or c == '\n') word_start = i + 1;
+        if (c == '_' and i > 0 and i + 1 < text.len and isLowerOrDigit(text[i - 1]) and std.ascii.isLower(text[i + 1])) {
+            const word_end = std.mem.findAnyPos(u8, text, i, " \n") orelse text.len;
+            if (std.mem.findScalar(u8, text[word_start..word_end], '/') == null and !startsWithUnderscore(text, i)) {
+                try out.append(allocator, std.ascii.toUpper(text[i + 1]));
+                i += 1;
+                changed = true;
+                continue;
+            }
+        }
+        try out.append(allocator, c);
+    }
+    if (!changed) {
+        out.deinit(allocator);
+        return null;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn isLowerOrDigit(c: u8) bool {
+    return std.ascii.isLower(c) or std.ascii.isDigit(c);
+}
+
+/// Whether the name the `_` at `i` is in starts with `_` (`_unused_thing`).
+fn startsWithUnderscore(text: []const u8, i: usize) bool {
+    var j = i;
+    while (j > 0 and (std.ascii.isAlphanumeric(text[j - 1]) or text[j - 1] == '_')) j -= 1;
+    return text[j] == '_';
+}
+
+/// Whether `remap` knows the `.punk` file `path`.
+pub fn hasSourceMap(path: []const u8) bool {
+    source_maps.lock();
+    defer source_maps.mutex.unlock();
+    return source_maps.map.contains(path);
+}
+
+fn offsetOf(lines: []const u32, p: Position) u32 {
+    if (p.line == 0) return 0;
+    const idx = @min(p.line - 1, lines.len - 1);
+    return lines[idx] + (p.column -| 1);
+}
+
+fn positionOf(lines: []const u32, offset: u32) Position {
+    var lo: usize = 0;
+    var hi: usize = lines.len;
+    while (hi - lo > 1) {
+        const mid = (lo + hi) / 2;
+        if (lines[mid] <= offset) lo = mid else hi = mid;
+    }
+    return .{ .line = @intCast(lo + 1), .column = offset - lines[lo] + 1 };
 }
 
 const LoadCtx = struct { reader: Reader, dir: []const u8 };

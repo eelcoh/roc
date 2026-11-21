@@ -949,3 +949,39 @@ test "a type alias with the name of its module" {
     try checkWith("import Grid exposing (Grid, size)\n\nf : Grid -> Grid.Grid -> U64\nf = fn a, b -> size a\n", "import Grid exposing [size]\n\nf : Grid.GridAlias, Grid.GridAlias -> U64\nf = |a, b| size(a)\n");
     try checkWith("import Grid exposing (Grid)\n\nf : Grid -> U64\nf = fn a -> Grid.size a\n", "import Grid\n\nf : Grid.GridAlias -> U64\nf = |a| Grid.size(a)\n");
 }
+
+test "error positions map back to the .punk source" {
+    const src =
+        \\main = fn x ->
+        \\    x
+        \\        |> List.keepIf isGood
+        \\        |> List.map toWord
+    ;
+    const out = try mod.toRoc(std.testing.allocator, "map.punk", src);
+    defer std.testing.allocator.free(out);
+    // main = |x| List.map(List.keep_if(x, is_good), to_word)
+    const line2 = out[0 .. std.mem.findScalar(u8, out, '\n') orelse out.len];
+    const col = std.mem.find(u8, line2, "is_good").? + 1;
+    // `is_good` in the translation is `isGood` on line 3 of the source.
+    const r = (try mod.remap(std.testing.allocator, "map.punk", .{ .line = 1, .column = @intCast(col) }, .{ .line = 1, .column = @intCast(col + "is_good".len) })).?;
+    defer std.testing.allocator.free(r.lines);
+    try std.testing.expectEqual(@as(u32, 3), r.start.line);
+    try std.testing.expectEqual(@as(u32, 24), r.start.column);
+    try std.testing.expectEqual(@as(u32, 30), r.end.column);
+    try std.testing.expectEqualStrings("        |> List.keepIf isGood", r.lines);
+    // The whole call covers the pipeline it came from.
+    const start = std.mem.find(u8, line2, "List.map").? + 1;
+    const call = (try mod.remap(std.testing.allocator, "map.punk", .{ .line = 1, .column = @intCast(start) }, .{ .line = 1, .column = @intCast(line2.len + 1) })).?;
+    defer std.testing.allocator.free(call.lines);
+    try std.testing.expectEqual(@as(u32, 2), call.start.line);
+    try std.testing.expectEqual(@as(u32, 4), call.end.line);
+}
+
+test "error messages use punkroc's names" {
+    const a = std.testing.allocator;
+    const c = (try mod.camelText(a, "Nothing is named not_defined, try List.keep_if")).?;
+    defer a.free(c);
+    try std.testing.expectEqualStrings("Nothing is named notDefined, try List.keepIf", c);
+    try std.testing.expectEqual(null, try mod.camelText(a, "prefix it like _unused_name"));
+    try std.testing.expectEqual(null, try mod.camelText(a, "in examples/punk/aoc_day2.punk"));
+}

@@ -39,6 +39,7 @@ pub const RuntimeLoweringConfig = struct {
 const Report = reporting.Report;
 const BuiltinModules = eval.BuiltinModules;
 const compile_package = @import("compile_package.zig");
+const punk_report = @import("punk_report.zig");
 const Mode = compile_package.Mode;
 const Allocator = std.mem.Allocator;
 
@@ -143,7 +144,7 @@ fn freeConstSlice(gpa: Allocator, s: []const u8) void {
 
 /// punkroc: the report for a syntax error in the `.punk` file `path`, when
 /// that is why reading it failed. The translator finds these, not the Roc
-/// parser, so they have no source region; the headline names the position.
+/// parser; the report shows the line of the `.punk` file.
 pub fn punkSyntaxReport(gpa: Allocator, path: []const u8) Allocator.Error!?Report {
     const full = (try CoreCtx.punkSyntaxError(gpa, path)) orelse return null;
     defer gpa.free(full);
@@ -155,11 +156,11 @@ pub fn punkSyntaxReport(gpa: Allocator, path: []const u8) Allocator.Error!?Repor
     _ = position.next();
     const line = position.next() orelse "?";
     const col = position.next() orelse "?";
-    const after = try std.fmt.allocPrint(gpa, ", line {s}, column {s}.", .{ line, col });
-    defer gpa.free(after);
-    var report = try Report.initWithPath(gpa, "Syntax Error", "There is a syntax error in ", path, after, .fatal);
+    // The source region below shows where.
+    var report = try Report.initWithPath(gpa, "Syntax Error", "There is a syntax error in ", path, ".", .fatal);
     errdefer report.deinit();
     try report.document.addReflowingText(message);
+    try punk_report.addSyntaxErrorSource(&report, path, line, col);
     return report;
 }
 
@@ -4458,8 +4459,13 @@ pub const OrderedSink = struct {
             // Note: do not append to order here; buildOrder will populate and sort later
         }
 
+        // punkroc: a report about a `.punk` file points at that file, not
+        // at its Roc translation.
+        var owned = report;
+        try punk_report.remapReport(&owned);
+
         // Record report; take ownership by appending to per-module list
-        try self.entries.items[entry_index].reports.append(report);
+        try self.entries.items[entry_index].reports.append(owned);
         self.entries.items[entry_index].ready = true;
 
         // Attempt ordered emission only if order has been built
