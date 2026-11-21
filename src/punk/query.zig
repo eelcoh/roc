@@ -1,0 +1,1014 @@
+//! punkroc's query language (roadmap B1): tables declared in punk, and
+//! queries on them written as pipelines that compile to one SQL statement.
+//!
+//!     table links : Link
+//!         key id
+//!         read everyone
+//!         insert everyone
+//!         update nobody
+//!         delete nobody
+//!
+//!     findLink : Str -> Db.Query (Maybe Link)
+//!     findLink = fn id ->
+//!         links
+//!             |> Db.filter (fn link -> link.id == id)
+//!             |> Db.first
+//!
+//! The translator sees the whole pipeline, so it writes the SQL
+//! (`SELECT id, url, created FROM links WHERE id = $1 LIMIT 1`), the values
+//! that go in as parameters (`Db.param_text(id)`) and a decoder for the
+//! rows, and gives them to the platform's `Db` module (platforms/server/Db.roc).
+//! What can't run in the database, a column the table doesn't have, a value
+//! of the wrong type and an operation the table's policy forbids are errors
+//! with a rule code (P401..P404, see rules.zig). The parameters are typed by
+//! the column they meet (`Db.param_text`), so Roc's type checker catches a
+//! variable of the wrong type.
+
+const std = @import("std");
+const tr = @import("translate.zig");
+const Allocator = std.mem.Allocator;
+const Emitter = tr.Emitter;
+const Expr = tr.Expr;
+const Block = tr.Block;
+const Error = tr.Error;
+
+/// A table as the parser reads it: `table links : Link` and its lines.
+pub const TableDecl = struct {
+    name: []const u8,
+    row_type: []const u8,
+    lines: []const Line,
+
+    /// `key id`, `read everyone`, ...
+    pub const Line = struct { word: []const u8, arg: []const u8 };
+};
+
+/// The type of a column: Str, Int, Float or Bool, or `Maybe` of one of
+/// these for a column that can be NULL.
+pub const ColType = struct {
+    base: Base,
+    nullable: bool = false,
+
+    pub const Base = enum { str, int, float, bool };
+
+    fn eql(a: ColType, b: ColType) bool {
+        return a.base == b.base and a.nullable == b.nullable;
+    }
+
+    fn name(t: ColType, a: Allocator) Allocator.Error![]const u8 {
+        const base = switch (t.base) {
+            .str => "Str",
+            .int => "Int",
+            .float => "Float",
+            .bool => "Bool",
+        };
+        return if (t.nullable) std.fmt.allocPrint(a, "Maybe {s}", .{base}) else base;
+    }
+
+    /// The type's name after "a" or "an": "an Int", "a Maybe Str".
+    fn an(t: ColType, a: Allocator) Allocator.Error![]const u8 {
+        const n = try t.name(a);
+        return std.fmt.allocPrint(a, "{s} {s}", .{ if (n[0] == 'I') "an" else "a", n });
+    }
+};
+
+pub const Column = struct {
+    /// The field of the row type, as punk writes it (`createdAt`).
+    name: []const u8,
+    /// Its name in SQL (`created_at`, or `"user"` when it is a keyword).
+    sql: []const u8,
+    /// Its name as Postgres gives it back, without quotes.
+    plain: []const u8,
+    ty: ColType,
+};
+
+/// Who may do an operation on a table. B2 adds a function of the user and
+/// the row, which becomes a row-level security policy.
+pub const Access = enum { everyone, nobody };
+
+pub const Op = enum {
+    read,
+    insert,
+    update,
+    delete,
+
+    fn verb(op: Op) []const u8 {
+        return switch (op) {
+            .read => "read",
+            .insert => "insert",
+            .update => "update",
+            .delete => "delete",
+        };
+    }
+};
+
+/// A table whose row type and policy have been checked.
+pub const Table = struct {
+    decl: TableDecl,
+    sql: []const u8,
+    columns: []const Column,
+    key: ?usize,
+    access: [4]Access,
+
+    fn column(t: *const Table, name: []const u8) ?*const Column {
+        for (t.columns) |*c| if (std.mem.eql(u8, c.name, name)) return c;
+        return null;
+    }
+
+    fn columnNames(t: *const Table, a: Allocator) Allocator.Error![]const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        for (t.columns, 0..) |c, i| {
+            if (i > 0) try out.appendSlice(a, ", ");
+            try out.appendSlice(a, c.name);
+        }
+        return out.items;
+    }
+};
+
+// Tables
+
+/// Checks the table declarations of a module against its type aliases and
+/// adds them to `e.tables`.
+pub fn resolveTables(e: *Emitter, items: []const tr.Item) Error!void {
+    for (items) |item| {
+        if (item.kind != .table) continue;
+        const decl = item.kind.table;
+        if (e.tables.contains(decl.name)) {
+            return e.errAtRule(decl.name, .table_decl, try std.fmt.allocPrint(e.a, "there is already a table '{s}'", .{decl.name}));
+        }
+        const table = try resolveTable(e, items, decl);
+        try e.tables.put(e.a, decl.name, table);
+    }
+    // A table's name is not a value: it only starts a query.
+    for (items) |item| switch (item.kind) {
+        .def => |d| if (d.pat.* == .ident) if (e.tables.contains(d.pat.ident)) {
+            return e.errAtRule(d.pat.ident, .table_decl, try std.fmt.allocPrint(e.a, "'{s}' is the name of a table, so it can't also be a definition", .{d.pat.ident}));
+        },
+        else => {},
+    };
+}
+
+fn resolveTable(e: *Emitter, items: []const tr.Item, decl: TableDecl) Error!*Table {
+    const a = e.a;
+    const ty = findAlias(items, decl.row_type) orelse {
+        return e.errAtRule(decl.row_type, .table_decl, try std.fmt.allocPrint(a, "the table '{s}' holds rows of type {s}, but this module has no 'type alias {s} = {{ ... }}'", .{ decl.name, decl.row_type, decl.row_type }));
+    };
+    var inner = ty;
+    while (inner.* == .paren) inner = inner.paren;
+    if (inner.* != .record or inner.record.ext != null or inner.record.fields.len == 0) {
+        return e.errAtRule(decl.row_type, .table_decl, try std.fmt.allocPrint(a, "the rows of a table are a record: 'type alias {s} = {{ id : Str, ... }}'", .{decl.row_type}));
+    }
+    var columns: std.ArrayList(Column) = .empty;
+    for (inner.record.fields) |f| {
+        const col_ty = columnType(f.ty) orelse {
+            return e.errAtRule(f.name, .table_decl, try std.fmt.allocPrint(a, "the column '{s}' of the table '{s}' can't be stored: a column is a Str, Int, Float or Bool, or a Maybe of one of these when it can be empty", .{ f.name, decl.name }));
+        };
+        const plain = try tr.snake(a, f.name);
+        try columns.append(a, .{ .name = f.name, .sql = try sqlIdent(a, plain), .plain = plain, .ty = col_ty });
+    }
+
+    var table = try a.create(Table);
+    const plain_name = try tr.snake(a, decl.name);
+    table.* = .{ .decl = decl, .sql = try sqlIdent(a, plain_name), .columns = columns.items, .key = null, .access = undefined };
+    var seen = [4]bool{ false, false, false, false };
+    for (decl.lines) |line| {
+        if (std.mem.eql(u8, line.word, "key")) {
+            if (table.key != null) return e.errAtRule(line.word, .table_decl, "a table has one key");
+            for (table.columns, 0..) |c, i| if (std.mem.eql(u8, c.name, line.arg)) {
+                table.key = i;
+            };
+            const key = table.key orelse {
+                return e.errAtRule(line.arg, .table_decl, try std.fmt.allocPrint(a, "the table '{s}' has no column '{s}' for its key (it has {s})", .{ decl.name, line.arg, try table.columnNames(a) }));
+            };
+            if (table.columns[key].ty.nullable) {
+                return e.errAtRule(line.arg, .table_decl, try std.fmt.allocPrint(a, "the key '{s}' can't be a Maybe: every row has a key", .{line.arg}));
+            }
+            continue;
+        }
+        const op = std.meta.stringToEnum(Op, line.word) orelse {
+            return e.errAtRule(line.word, .table_decl, try std.fmt.allocPrint(a, "a table has the lines 'key', 'read', 'insert', 'update' and 'delete', not '{s}'", .{line.word}));
+        };
+        if (seen[@intFromEnum(op)]) {
+            return e.errAtRule(line.word, .table_decl, try std.fmt.allocPrint(a, "the table '{s}' says twice who may {s}", .{ decl.name, op.verb() }));
+        }
+        const access = std.meta.stringToEnum(Access, line.arg) orelse {
+            return e.errAtRule(line.arg, .table_decl, try std.fmt.allocPrint(a, "who may {s}: 'everyone' or 'nobody', not '{s}'", .{ op.verb(), line.arg }));
+        };
+        seen[@intFromEnum(op)] = true;
+        table.access[@intFromEnum(op)] = access;
+    }
+    for (seen, 0..) |s, i| if (!s) {
+        const op: Op = @enumFromInt(i);
+        return e.errAtRule(decl.name, .table_decl, try std.fmt.allocPrint(a, "the table '{s}' doesn't say who may {s} its rows: add the line '{s} everyone' or '{s} nobody'. A table says who may read, insert, update and delete, so that no rows are open by accident.", .{ decl.name, op.verb(), op.verb(), op.verb() }));
+    };
+    return table;
+}
+
+fn findAlias(items: []const tr.Item, name: []const u8) ?*tr.Type {
+    for (items) |item| if (item.kind == .type_alias) {
+        const t = item.kind.type_alias;
+        if (std.mem.eql(u8, t.name, name) and t.params.len == 0) return t.ty;
+    };
+    return null;
+}
+
+fn columnType(ty: *tr.Type) ?ColType {
+    switch (ty.*) {
+        .paren => |inner| return columnType(inner),
+        .name => |n| return .{ .base = baseType(n) orelse return null },
+        .app => |app| {
+            if (!std.mem.eql(u8, app.head, "Maybe") or app.args.len != 1) return null;
+            const inner = columnType(app.args[0]) orelse return null;
+            if (inner.nullable) return null;
+            return .{ .base = inner.base, .nullable = true };
+        },
+        else => return null,
+    }
+}
+
+fn baseType(n: []const u8) ?ColType.Base {
+    const names = .{
+        .{ "Str", .str },   .{ "String", .str },
+        .{ "Int", .int },   .{ "I64", .int },
+        .{ "Float", .float }, .{ "F64", .float },
+        .{ "Bool", .bool },
+    };
+    inline for (names) |row| if (std.mem.eql(u8, n, row[0])) return row[1];
+    return null;
+}
+
+const sql_keywords = [_][]const u8{
+    "all",          "analyse",      "analyze",   "and",          "any",       "array",    "as",         "asc",
+    "asymmetric",   "both",         "case",      "cast",         "check",     "collate",  "column",     "constraint",
+    "create",       "current_date", "current_role", "current_time", "current_timestamp", "current_user", "default", "deferrable",
+    "desc",         "distinct",     "do",        "else",         "end",       "except",   "false",      "fetch",
+    "for",          "foreign",      "from",      "grant",        "group",     "having",   "in",         "initially",
+    "intersect",    "into",         "lateral",   "leading",      "limit",     "localtime", "localtimestamp", "not",
+    "null",         "offset",       "on",        "only",         "or",        "order",    "placing",    "primary",
+    "references",   "returning",    "select",    "session_user", "some",      "symmetric", "table",     "then",
+    "to",           "trailing",     "true",      "union",        "unique",    "user",     "using",      "variadic",
+    "when",         "where",        "window",    "with",
+};
+
+/// How a name is written in SQL: as it is, or in double quotes when it is a
+/// keyword (`"user"`).
+fn sqlIdent(a: Allocator, plain: []const u8) Allocator.Error![]const u8 {
+    for (sql_keywords) |k| if (std.mem.eql(u8, k, plain)) return std.fmt.allocPrint(a, "\"{s}\"", .{plain});
+    return plain;
+}
+
+/// `CREATE TABLE` statements for the tables of a module, as `punk schema`
+/// prints them, so that the database holds what the program says.
+pub fn schemaSql(a: Allocator, tables: []const *const Table) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a,
+        \\-- Made by `punk check --schema` from the tables of the program. Until punk
+        \\-- has verified migrations (roadmap B2), a change to a table is a change you
+        \\-- also make to the database by hand.
+        \\
+        \\
+    );
+    for (tables, 0..) |t, ti| {
+        if (ti > 0) try out.appendSlice(a, "\n");
+        try out.print(a, "CREATE TABLE IF NOT EXISTS {s} (\n", .{t.sql});
+        for (t.columns, 0..) |c, i| {
+            const sql_ty = switch (c.ty.base) {
+                .str => "text",
+                .int => "bigint",
+                .float => "double precision",
+                .bool => "boolean",
+            };
+            const constraint: []const u8 = if (t.key != null and t.key.? == i) " PRIMARY KEY" else if (c.ty.nullable) "" else " NOT NULL";
+            try out.print(a, "    {s} {s}{s}{s}\n", .{ c.sql, sql_ty, constraint, if (i + 1 < t.columns.len) "," else "" });
+        }
+        try out.appendSlice(a, ");\n");
+    }
+    return out.items;
+}
+
+// Queries
+
+const Member = enum { filter, map, all, first, insert, insertIfNew, update, delete };
+
+/// The query-language function `name` names (`Db.filter`), if it is one.
+pub fn member(e: *const Emitter, name: []const u8) ?Member {
+    const alias = e.db_alias orelse return null;
+    if (name.len <= alias.len + 1 or !std.mem.startsWith(u8, name, alias) or name[alias.len] != '.') return null;
+    return std.meta.stringToEnum(Member, name[alias.len + 1 ..]);
+}
+
+/// The error for a query-language function used other than at the end of
+/// a pipeline (`List.map Db.filter xs`).
+pub fn notInPipeline(e: *Emitter, name: []const u8) Error {
+    const alias = e.db_alias orelse "Db";
+    return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(e.a, "'{s}' only works in a query, a pipeline that starts at a table and ends in {s}.all, {s}.first or {s}.delete: links |> {s}.filter (fn link -> link.id == id) |> {s}.first", .{ name, alias, alias, alias, alias, alias }));
+}
+
+/// The error for the name of a table used as a value.
+pub fn tableAsValue(e: *Emitter, name: []const u8) Error {
+    const alias = e.db_alias orelse "Db";
+    return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(e.a, "'{s}' is a table: it starts a query, as in {s} |> {s}.all, and is not a value on its own", .{ name, name, alias }));
+}
+
+const Param = struct { expr: *Expr, ty: ColType };
+
+/// What a query gives for each row.
+const Shape = union(enum) {
+    /// The whole row, as the table's record.
+    row,
+    /// One value: `Db.map .url`.
+    single: Out,
+    /// A record of values: `Db.map (fn l -> { url = l.url, ... })`.
+    record: []const Out,
+
+    const Out = struct { field: []const u8, sql: []const u8, plain: []const u8, ty: ColType };
+};
+
+/// Writes the Roc for a query whose last step is `name` (`Db.all`), with
+/// the arguments it got (the pipeline before it is the last argument).
+pub fn emit(e: *Emitter, name: []const u8, m: Member, args: []*Expr) Error!void {
+    const a = e.a;
+    const alias = e.db_alias.?;
+    const want: usize = switch (m) {
+        .filter, .map => return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(a, "a query ends in {s}.all, {s}.first, {s}.update or {s}.delete, which say what it gives: links |> {s}.filter (fn link -> ...) |> {s}.all", .{ alias, alias, alias, alias, alias, alias })),
+        .all, .first, .delete => 1,
+        .update, .insert, .insertIfNew => 2,
+    };
+    if (args.len != want) {
+        return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(a, "'{s}' needs {d} argument{s} here, the last one the query before it: punk turns the whole query into SQL, so it can't be applied partly", .{ name, want, if (want == 1) "" else "s" }));
+    }
+
+    if (m == .insert or m == .insertIfNew) return emitInsert(e, name, m, args[0], args[1]);
+
+    // Walk back from the last step to the table.
+    var filters: std.ArrayList(*Expr) = .empty;
+    var map: ?*Expr = null;
+    var src = args[args.len - 1];
+    const table: *const Table = while (true) {
+        while (src.* == .paren) src = src.paren;
+        switch (src.*) {
+            .ident => |n| {
+                if (e.tables.get(n)) |t| break t;
+                return notATable(e, n);
+            },
+            .app => |app| {
+                var f = app.func;
+                while (f.* == .paren) f = f.paren;
+                const step_name = if (f.* == .ident) f.ident else return notATableExpr(e, name);
+                const step = member(e, step_name) orelse return notATable(e, step_name);
+                switch (step) {
+                    .filter => {
+                        if (app.args.len != 2) return e.errAtRule(step_name, .not_in_database, try std.fmt.allocPrint(a, "'{s}' takes a function and the query before it: |> {s}.filter (fn link -> link.id == id)", .{ step_name, alias }));
+                        try filters.append(a, app.args[0]);
+                        src = app.args[1];
+                    },
+                    .map => {
+                        if (app.args.len != 2) return e.errAtRule(step_name, .not_in_database, try std.fmt.allocPrint(a, "'{s}' takes a function and the query before it: |> {s}.map .url", .{ step_name, alias }));
+                        if (map != null) return e.errAtRule(step_name, .not_in_database, try std.fmt.allocPrint(a, "a query has one {s}.map: put what it gives in one record, {s}.map (fn link -> {{ url = link.url, created = link.created }})", .{ alias, alias }));
+                        if (filters.items.len > 0) return e.errAtRule(step_name, .not_in_database, try std.fmt.allocPrint(a, "{s}.filter comes before {s}.map in a query: a filter looks at the rows of the table", .{ alias, alias }));
+                        map = app.args[0];
+                        src = app.args[1];
+                    },
+                    else => return e.errAtRule(step_name, .not_in_database, try std.fmt.allocPrint(a, "'{s}' ends a query, so nothing can come after it but {s}.run!", .{ step_name, alias })),
+                }
+            },
+            else => return notATableExpr(e, name),
+        }
+    };
+    std.mem.reverse(*Expr, filters.items);
+
+    const op: Op = switch (m) {
+        .all, .first => .read,
+        .update => .update,
+        .delete => .delete,
+        else => unreachable,
+    };
+    try checkAccess(e, table, op, name);
+    if (map != null and (m == .update or m == .delete)) {
+        return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(a, "{s}.map says what a query gives back, but '{s}' gives the number of rows it changed: leave the map out", .{ alias, name }));
+    }
+
+    var params: std.ArrayList(Param) = .empty;
+    var sql: std.ArrayList(u8) = .empty;
+    var shape: Shape = .row;
+    switch (m) {
+        .all, .first => {
+            if (map) |f| shape = try mapShape(e, table, f, &params);
+            try sql.appendSlice(a, "SELECT ");
+            switch (shape) {
+                .row => for (table.columns, 0..) |c, i| {
+                    if (i > 0) try sql.appendSlice(a, ", ");
+                    try sql.appendSlice(a, c.sql);
+                },
+                .single => |out| try selectOut(a, &sql, out),
+                .record => |outs| for (outs, 0..) |out, i| {
+                    if (i > 0) try sql.appendSlice(a, ", ");
+                    try selectOut(a, &sql, out);
+                },
+            }
+            try sql.print(a, " FROM {s}", .{table.sql});
+        },
+        .delete => try sql.print(a, "DELETE FROM {s}", .{table.sql}),
+        .update => {
+            try sql.print(a, "UPDATE {s} SET ", .{table.sql});
+            try updateSet(e, table, args[0], &sql, &params);
+        },
+        else => unreachable,
+    }
+    if (filters.items.len > 0) {
+        try sql.appendSlice(a, " WHERE ");
+        for (filters.items, 0..) |f, i| {
+            if (i > 0) try sql.appendSlice(a, " AND ");
+            const lam = try rowLambda(e, f, "filter");
+            var q: Sql = .{ .e = e, .table = table, .row = lam.row, .out = &sql, .params = &params };
+            const many = filters.items.len > 1 and lam.body.* == .binop and std.mem.eql(u8, lam.body.binop.op, "||");
+            if (many) try sql.appendSlice(a, "(");
+            const ty = try q.expr(lam.body, .{ .base = .bool }, 0);
+            if (many) try sql.appendSlice(a, ")");
+            if (ty.base != .bool or ty.nullable) {
+                return e.errAtRule(lam.at, .query_type, try std.fmt.allocPrint(a, "the function of a filter gives a Bool, true for the rows to keep, but this one gives {s}", .{try ty.an(a)}));
+            }
+        }
+    }
+    if (m == .first) try sql.appendSlice(a, " LIMIT 1");
+
+    // The Roc: `Db.all_rows([params], "SQL", decoder)`.
+    try e.markAt(name, 0);
+    try e.w(alias);
+    try e.w(switch (m) {
+        .all => ".all_rows(",
+        .first => ".first_row(",
+        else => ".changes(",
+    });
+    try emitParams(e, params.items);
+    try e.w(", ");
+    try emitSqlString(e, sql.items);
+    if (m == .all or m == .first) {
+        try e.w(", ");
+        try emitDecoder(e, table, shape);
+    }
+    try e.w(")");
+}
+
+fn notATable(e: *Emitter, n: []const u8) Error {
+    const alias = e.db_alias orelse "Db";
+    return e.errAtRule(n, .not_in_database, try std.fmt.allocPrint(e.a, "a query starts at a table that this module declares ('table links : Link'), but '{s}' is not one: links |> {s}.filter (fn link -> ...) |> {s}.all", .{ n, alias, alias }));
+}
+
+fn notATableExpr(e: *Emitter, at: []const u8) Error {
+    const alias = e.db_alias orelse "Db";
+    return e.errAtRule(at, .not_in_database, try std.fmt.allocPrint(e.a, "a query starts at a table that this module declares, written right here: links |> {s}.filter (fn link -> ...) |> {s}.all", .{ alias, alias }));
+}
+
+fn checkAccess(e: *Emitter, table: *const Table, op: Op, at: []const u8) Error!void {
+    if (table.access[@intFromEnum(op)] == .everyone) return;
+    return e.errAtRule(at, .not_allowed, try std.fmt.allocPrint(e.a, "the table '{s}' doesn't allow anyone to {s} its rows ('{s} nobody' in its declaration)", .{ table.decl.name, op.verb(), op.verb() }));
+}
+
+fn selectOut(a: Allocator, sql: *std.ArrayList(u8), out: Shape.Out) Allocator.Error!void {
+    try sql.appendSlice(a, out.sql);
+    if (!std.mem.eql(u8, out.sql, out.plain) and !(out.sql.len == out.plain.len + 2 and out.sql[0] == '"')) {
+        try sql.print(a, " AS {s}", .{try sqlIdent(a, out.plain)});
+    }
+}
+
+const RowLambda = struct { row: ?[]const u8, body: *Expr, at: []const u8 };
+
+/// The function of a `filter`, `map` or `update`, which has to be written
+/// in the query (`fn link -> link.id == id`) so that punk can see its body.
+fn rowLambda(e: *Emitter, x_in: *Expr, step: []const u8) Error!RowLambda {
+    var x = x_in;
+    while (x.* == .paren) x = x.paren;
+    const alias = e.db_alias orelse "Db";
+    if (x.* != .lambda or x.lambda.params.len != 1) {
+        const at = exprText(x_in) orelse step;
+        return e.errAtRule(at, .not_in_database, try std.fmt.allocPrint(e.a, "{s}.{s} takes a function of one row written right here, such as (fn link -> link.id == id), so that punk can turn it into SQL", .{ alias, step }));
+    }
+    const lam = x.lambda;
+    const row: ?[]const u8 = switch (lam.params[0].*) {
+        .ident => |n| n,
+        .underscore => null,
+        else => {
+            return e.errAtRule(exprText(x_in) orelse step, .not_in_database, try std.fmt.allocPrint(e.a, "the function of {s}.{s} takes the row as a name, as in (fn link -> ...)", .{ alias, step }));
+        },
+    };
+    if (lam.body.stmts.len > 0 or lam.body.result == null) {
+        return e.errAtRule(row orelse step, .not_in_database, try std.fmt.allocPrint(e.a, "the function of {s}.{s} is one expression, so that it can run in the database", .{ alias, step }));
+    }
+    return .{ .row = row, .body = lam.body.result.?, .at = row orelse step };
+}
+
+fn mapShape(e: *Emitter, table: *const Table, f: *Expr, params: *std.ArrayList(Param)) Error!Shape {
+    const a = e.a;
+    const lam = try rowLambda(e, f, "map");
+    var body = lam.body;
+    while (body.* == .paren) body = body.paren;
+    if (lam.row) |row| if (body.* == .ident and std.mem.eql(u8, body.ident, row)) return .row;
+    if (body.* == .record and body.record.base == null) {
+        var outs: std.ArrayList(Shape.Out) = .empty;
+        for (body.record.fields) |fld| {
+            const value = fld.value orelse return e.errAtRule(fld.name, .not_in_database, try std.fmt.allocPrint(a, "write where '{s}' comes from: {{ {s} = {s}.{s} }}", .{ fld.name, fld.name, lam.row orelse "row", fld.name }));
+            try outs.append(a, try mapOut(e, table, lam.row, value, fld.name, params));
+        }
+        return .{ .record = outs.items };
+    }
+    const fallback = if (body.* == .field) body.field.name else "value";
+    return .{ .single = try mapOut(e, table, lam.row, body, fallback, params) };
+}
+
+fn mapOut(e: *Emitter, table: *const Table, row: ?[]const u8, value: *Expr, field: []const u8, params: *std.ArrayList(Param)) Error!Shape.Out {
+    const a = e.a;
+    if (row == null or !mentions(value, row.?)) {
+        return e.errAtRule(exprText(value) orelse field, .not_in_database, "a map in a query gives values from the row, such as link.url: a value that doesn't come from the row is easier to add after the query");
+    }
+    var out: std.ArrayList(u8) = .empty;
+    var q: Sql = .{ .e = e, .table = table, .row = row, .out = &out, .params = params };
+    const ty = try q.expr(value, null, 0);
+    return .{ .field = field, .sql = out.items, .plain = try tr.snake(a, field), .ty = ty };
+}
+
+fn updateSet(e: *Emitter, table: *const Table, f: *Expr, sql: *std.ArrayList(u8), params: *std.ArrayList(Param)) Error!void {
+    const a = e.a;
+    const alias = e.db_alias orelse "Db";
+    const lam = try rowLambda(e, f, "update");
+    var body = lam.body;
+    while (body.* == .paren) body = body.paren;
+    const ok = body.* == .record and body.record.base != null and lam.row != null and blk: {
+        var base = body.record.base.?;
+        while (base.* == .paren) base = base.paren;
+        break :blk base.* == .ident and std.mem.eql(u8, base.ident, lam.row.?);
+    };
+    if (!ok or body.record.fields.len == 0) {
+        return e.errAtRule(lam.at, .not_in_database, try std.fmt.allocPrint(a, "{s}.update takes a function that says which columns change: {s}.update (fn link -> {{ link | url = newUrl }})", .{ alias, alias }));
+    }
+    for (body.record.fields, 0..) |fld, i| {
+        const col = table.column(fld.name) orelse return unknownColumn(e, table, fld.name);
+        if (table.key != null and &table.columns[table.key.?] == col) {
+            return e.errAtRule(fld.name, .not_in_database, try std.fmt.allocPrint(a, "'{s}' is the key of the table '{s}': a row keeps its key", .{ fld.name, table.decl.name }));
+        }
+        if (i > 0) try sql.appendSlice(a, ", ");
+        try sql.print(a, "{s} = ", .{col.sql});
+        const value = fld.value orelse return e.errAtRule(fld.name, .not_in_database, try std.fmt.allocPrint(a, "write the new value of '{s}': {{ {s} | {s} = ... }}", .{ fld.name, lam.row.?, fld.name }));
+        var q: Sql = .{ .e = e, .table = table, .row = lam.row, .out = sql, .params = params };
+        const ty = try q.expr(value, col.ty, 0);
+        try q.expectType(value, ty, col.ty, fld.name);
+    }
+}
+
+fn emitInsert(e: *Emitter, name: []const u8, m: Member, row_expr: *Expr, table_expr: *Expr) Error!void {
+    const a = e.a;
+    const alias = e.db_alias.?;
+    var t_expr = table_expr;
+    while (t_expr.* == .paren) t_expr = t_expr.paren;
+    if (t_expr.* != .ident) return notATableExpr(e, name);
+    const table = e.tables.get(t_expr.ident) orelse return notATable(e, t_expr.ident);
+    try checkAccess(e, table, .insert, name);
+
+    var params: std.ArrayList(Param) = .empty;
+    var sql: std.ArrayList(u8) = .empty;
+    try sql.print(a, "INSERT INTO {s} (", .{table.sql});
+    for (table.columns, 0..) |c, i| {
+        if (i > 0) try sql.appendSlice(a, ", ");
+        try sql.appendSlice(a, c.sql);
+    }
+    try sql.appendSlice(a, ") VALUES (");
+    for (table.columns, 0..) |_, i| {
+        if (i > 0) try sql.appendSlice(a, ", ");
+        try sql.print(a, "${d}", .{i + 1});
+    }
+    try sql.appendSlice(a, ")");
+    if (m == .insertIfNew) try sql.appendSlice(a, " ON CONFLICT DO NOTHING");
+
+    var row = row_expr;
+    while (row.* == .paren) row = row.paren;
+    try e.markAt(name, 0);
+    if (row.* == .record and row.record.base == null) {
+        // A record written here: each field is a parameter, typed by its column.
+        for (row.record.fields) |fld| if (table.column(fld.name) == null) return unknownColumn(e, table, fld.name);
+        for (table.columns) |c| {
+            const fld = for (row.record.fields) |fld| {
+                if (std.mem.eql(u8, fld.name, c.name)) break fld;
+            } else {
+                return e.errAtRule(name, .query_type, try std.fmt.allocPrint(a, "the row for the table '{s}' has no '{s}': a new row has all of {s}", .{ table.decl.name, c.name, try table.columnNames(a) }));
+            };
+            const value = fld.value orelse try e.newExpr(.{ .ident = fld.name });
+            try checkLiteral(e, value, c.ty, try std.fmt.allocPrint(a, "the column '{s}'", .{c.name}));
+            try params.append(a, .{ .expr = value, .ty = c.ty });
+        }
+        try e.w(alias);
+        try e.w(".changes(");
+        try emitParams(e, params.items);
+        try e.w(", ");
+        try emitSqlString(e, sql.items);
+        try e.w(")");
+        return;
+    }
+    // Another expression: compute it once, then its fields are the parameters.
+    e.fresh += 1;
+    const tmp = try std.fmt.allocPrint(a, "punk_row{d}", .{e.fresh});
+    const tmp_expr = try e.newExpr(.{ .ident_raw = tmp });
+    for (table.columns) |c| {
+        try params.append(a, .{ .expr = try e.newExpr(.{ .field = .{ .target = tmp_expr, .name = c.name } }), .ty = c.ty });
+    }
+    try e.w("{");
+    e.indent += 1;
+    try e.nl();
+    try e.w(tmp);
+    try e.w(" = ");
+    try e.emitExpr(row_expr);
+    try e.nl();
+    try e.w(alias);
+    try e.w(".changes(");
+    try emitParams(e, params.items);
+    try e.w(", ");
+    try emitSqlString(e, sql.items);
+    try e.w(")");
+    e.indent -= 1;
+    try e.nl();
+    try e.w("}");
+}
+
+fn unknownColumn(e: *Emitter, table: *const Table, name: []const u8) Error {
+    return e.errAtRule(name, .query_type, try std.fmt.allocPrint(e.a, "the table '{s}' has no column '{s}' (it has {s})", .{ table.decl.name, name, try table.columnNames(e.a) }));
+}
+
+fn emitParams(e: *Emitter, params: []const Param) Error!void {
+    const alias = e.db_alias.?;
+    try e.w("[");
+    for (params, 0..) |p, i| {
+        if (i > 0) try e.w(", ");
+        const base = switch (p.ty.base) {
+            .str => "param_text",
+            .int => "param_int",
+            .float => "param_float",
+            .bool => "param_bool",
+        };
+        try e.w(alias);
+        if (p.ty.nullable) try e.w(".param_nullable(") else {
+            try e.w(".");
+            try e.w(base);
+            try e.w("(");
+        }
+        try e.emitExpr(p.expr);
+        if (p.ty.nullable) {
+            try e.w(", ");
+            try e.w(alias);
+            try e.w(".");
+            try e.w(base);
+        }
+        try e.w(")");
+    }
+    try e.w("]");
+}
+
+fn emitSqlString(e: *Emitter, sql: []const u8) Error!void {
+    try e.w("\"");
+    for (sql) |c| switch (c) {
+        '"' => try e.w("\\\""),
+        '\\' => try e.w("\\\\"),
+        else => try e.buf.append(e.a, c),
+    };
+    try e.w("\"");
+}
+
+fn emitDecoder(e: *Emitter, table: *const Table, shape: Shape) Error!void {
+    const a = e.a;
+    const alias = e.db_alias.?;
+    switch (shape) {
+        .single => |out| {
+            try e.w(alias);
+            try e.w(".field(");
+            try emitReader(e, out.ty);
+            try e.buf.print(a, ", \"{s}\", {s}.done)", .{ out.plain, alias });
+        },
+        .row, .record => {
+            var fields: std.ArrayList(struct { field: []const u8, var_name: []const u8 }) = .empty;
+            var count: usize = 0;
+            const n = if (shape == .row) table.columns.len else shape.record.len;
+            for (0..n) |i| {
+                const field, const plain, const ty = if (shape == .row)
+                    .{ table.columns[i].name, table.columns[i].plain, table.columns[i].ty }
+                else
+                    .{ shape.record[i].field, shape.record[i].plain, shape.record[i].ty };
+                e.fresh += 1;
+                const v = try std.fmt.allocPrint(a, "punk_c{d}", .{e.fresh});
+                try fields.append(a, .{ .field = try tr.snake(a, field), .var_name = v });
+                try e.w(alias);
+                try e.w(".field(");
+                try emitReader(e, ty);
+                try e.buf.print(a, ", \"{s}\", |{s}| ", .{ plain, v });
+                count += 1;
+            }
+            try e.w(alias);
+            try e.w(".done({ ");
+            for (fields.items, 0..) |f, i| {
+                if (i > 0) try e.w(", ");
+                try e.buf.print(a, "{s}: {s}", .{ f.field, f.var_name });
+            }
+            try e.w(" })");
+            for (0..count) |_| try e.w(")");
+        },
+    }
+}
+
+fn emitReader(e: *Emitter, ty: ColType) Error!void {
+    const alias = e.db_alias.?;
+    const base = switch (ty.base) {
+        .str => "read_text",
+        .int => "read_int",
+        .float => "read_float",
+        .bool => "read_bool",
+    };
+    if (ty.nullable) {
+        try e.w(alias);
+        try e.w(".read_nullable(");
+    }
+    try e.w(alias);
+    try e.w(".");
+    try e.w(base);
+    if (ty.nullable) try e.w(")");
+}
+
+/// Checks a literal against the type of the column it goes into; other
+/// values are checked by Roc, through the typed `Db.param_*`.
+fn checkLiteral(e: *Emitter, value: *Expr, ty: ColType, column: []const u8) Error!void {
+    var v = value;
+    while (v.* == .paren) v = v.paren;
+    const lit: ?ColType.Base = switch (v.*) {
+        .string => .str,
+        .literal => |l| if (l.len > 0 and l[0] == '\'') null else if (std.mem.findAny(u8, l, ".eE") != null and !std.mem.startsWith(u8, l, "0x")) .float else .int,
+        else => null,
+    };
+    const base = lit orelse return;
+    if (base == ty.base or (base == .int and ty.base == .float)) {
+        if (!ty.nullable) return;
+    }
+    return e.errAtRule(exprText(v) orelse column, .query_type, try std.fmt.allocPrint(e.a, "this value doesn't fit {s}, which is {s}", .{ column, try ty.an(e.a) }));
+}
+
+/// Writes the SQL for an expression in a query's function, whose row is
+/// called `row`.
+const Sql = struct {
+    e: *Emitter,
+    table: *const Table,
+    row: ?[]const u8,
+    out: *std.ArrayList(u8),
+    params: *std.ArrayList(Param),
+
+    fn w(q: *Sql, s: []const u8) Allocator.Error!void {
+        try q.out.appendSlice(q.e.a, s);
+    }
+
+    /// The type an expression has in SQL, when it can tell without context:
+    /// a column, an operation on columns, a literal or `True`/`False`.
+    fn typeOf(q: *Sql, x: *Expr) Error!?ColType {
+        switch (x.*) {
+            .paren => |inner| return q.typeOf(inner),
+            .field => |f| if (q.isRow(f.target)) {
+                const col = q.table.column(f.name) orelse return unknownColumn(q.e, q.table, f.name);
+                return col.ty;
+            },
+            .binop => |b| {
+                if (isComparison(b.op) or std.mem.eql(u8, b.op, "&&") or std.mem.eql(u8, b.op, "||")) return .{ .base = .bool };
+                if (std.mem.eql(u8, b.op, "++")) return .{ .base = .str };
+                if (isArith(b.op)) return (try q.typeOf(b.lhs)) orelse try q.typeOf(b.rhs);
+            },
+            .not => return .{ .base = .bool },
+            .neg => |inner| return q.typeOf(inner),
+            .upper => |u| if (std.mem.eql(u8, u, "True") or std.mem.eql(u8, u, "False")) return .{ .base = .bool },
+            else => {},
+        }
+        return null;
+    }
+
+    fn isRow(q: *Sql, x_in: *Expr) bool {
+        var x = x_in;
+        while (x.* == .paren) x = x.paren;
+        const row = q.row orelse return false;
+        return x.* == .ident and std.mem.eql(u8, x.ident, row);
+    }
+
+    fn mentionsRow(q: *Sql, x: *Expr) bool {
+        const row = q.row orelse return false;
+        return mentions(x, row);
+    }
+
+    /// Writes the SQL of `x` and gives its type. `want` is the type the
+    /// place it is in asks for (a parameter takes it); `prec` the precedence
+    /// of the operator around it.
+    fn expr(q: *Sql, x: *Expr, want: ?ColType, prec: u8) Error!ColType {
+        const a = q.e.a;
+        if (!q.mentionsRow(x)) {
+            var v = x;
+            while (v.* == .paren) v = v.paren;
+            if (v.* == .upper and (std.mem.eql(u8, v.upper, "True") or std.mem.eql(u8, v.upper, "False"))) {
+                try q.w(if (std.mem.eql(u8, v.upper, "True")) "TRUE" else "FALSE");
+                return .{ .base = .bool };
+            }
+            const ty = want orelse literalType(v) orelse {
+                return q.e.errAtRule(exprText(v) orelse "", .query_type, "punk can't tell the type of this value in the query: compare it with a column of the row");
+            };
+            try checkLiteral(q.e, v, ty, "the column it meets");
+            try q.params.append(a, .{ .expr = x, .ty = ty });
+            try q.out.print(a, "${d}", .{q.params.items.len});
+            return ty;
+        }
+        switch (x.*) {
+            .paren => |inner| return q.expr(inner, want, prec),
+            .field => |f| if (q.isRow(f.target)) {
+                const col = q.table.column(f.name) orelse return unknownColumn(q.e, q.table, f.name);
+                try q.w(col.sql);
+                return col.ty;
+            },
+            .not => |inner| {
+                try q.w("NOT ");
+                const ty = try q.expr(inner, .{ .base = .bool }, 9);
+                try q.expectType(inner, ty, .{ .base = .bool }, "not");
+                return .{ .base = .bool };
+            },
+            .neg => |inner| {
+                try q.w("-");
+                return q.expr(inner, want, 9);
+            },
+            .binop => |b| return q.binop(x, b.op, b.lhs, b.rhs, prec),
+            else => {},
+        }
+        return q.notInDatabase(x);
+    }
+
+    fn binop(q: *Sql, x: *Expr, op: []const u8, lhs: *Expr, rhs: *Expr, outer: u8) Error!ColType {
+        const a = q.e.a;
+        const info = tr.Parser.opInfo(op) orelse return q.notInDatabase(x);
+        const paren = info.prec < outer;
+        if (paren) try q.w("(");
+        defer if (paren) q.out.appendSlice(a, ")") catch {};
+
+        if (std.mem.eql(u8, op, "&&") or std.mem.eql(u8, op, "||")) {
+            const lt = try q.expr(lhs, .{ .base = .bool }, info.prec);
+            try q.expectType(lhs, lt, .{ .base = .bool }, op);
+            try q.w(if (op[0] == '&') " AND " else " OR ");
+            const rt = try q.expr(rhs, .{ .base = .bool }, info.prec);
+            try q.expectType(rhs, rt, .{ .base = .bool }, op);
+            return .{ .base = .bool };
+        }
+        if (isComparison(op)) {
+            // `link.note == Nothing` is `note IS NULL`.
+            const l_nothing = isNothing(lhs);
+            const r_nothing = isNothing(rhs);
+            if (l_nothing or r_nothing) {
+                const side = if (l_nothing) rhs else lhs;
+                const ty = (try q.typeOf(side)) orelse return q.notInDatabase(x);
+                if (!ty.nullable) return q.e.errAtRule(exprText(if (l_nothing) lhs else rhs) orelse op, .query_type, try std.fmt.allocPrint(a, "this column is {s}, so it is never Nothing", .{try ty.an(a)}));
+                const negate = std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "!=");
+                if (!negate and !std.mem.eql(u8, op, "==")) return q.e.errAtRule(op, .query_type, "compare with Nothing using == or /=");
+                _ = try q.expr(side, null, 9);
+                try q.w(if (negate) " IS NOT NULL" else " IS NULL");
+                return .{ .base = .bool };
+            }
+            const lt0 = try q.typeOf(lhs);
+            const rt0 = try q.typeOf(rhs);
+            const nullable = (lt0 != null and lt0.?.nullable) or (rt0 != null and rt0.?.nullable);
+            if (nullable and !(std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "!="))) {
+                return q.e.errAtRule(op, .query_type, "a Maybe column is compared with == or /=: there is no order between Nothing and a value");
+            }
+            const lt = try q.expr(lhs, rt0, info.prec + 1);
+            try q.w(" ");
+            try q.w(if (nullable) (if (std.mem.eql(u8, op, "==")) "IS NOT DISTINCT FROM" else "IS DISTINCT FROM") else sqlOp(op));
+            try q.w(" ");
+            const rt = try q.expr(rhs, lt, info.prec + 1);
+            if (!lt.eql(rt) and !(isNumber(lt) and isNumber(rt) and lt.nullable == rt.nullable)) {
+                return q.e.errAtRule(op, .query_type, try std.fmt.allocPrint(a, "this compares {s} with {s}", .{ try lt.an(a), try rt.an(a) }));
+            }
+            return .{ .base = .bool };
+        }
+        if (isArith(op) or std.mem.eql(u8, op, "++")) {
+            const known = (try q.typeOf(lhs)) orelse (try q.typeOf(rhs));
+            const want: ?ColType = if (std.mem.eql(u8, op, "++")) ColType{ .base = .str } else known;
+            const lt = try q.expr(lhs, want, info.prec);
+            try q.w(" ");
+            try q.w(sqlOp(op));
+            try q.w(" ");
+            const rt = try q.expr(rhs, want orelse lt, info.prec + 1);
+            if (std.mem.eql(u8, op, "++")) {
+                try q.expectType(lhs, lt, .{ .base = .str }, op);
+                try q.expectType(rhs, rt, .{ .base = .str }, op);
+                return .{ .base = .str };
+            }
+            if (!isNumber(lt) or lt.nullable or !lt.eql(rt)) {
+                return q.e.errAtRule(op, .query_type, try std.fmt.allocPrint(a, "'{s}' works on two Ints or two Floats, not {s} and {s}", .{ op, try lt.an(a), try rt.an(a) }));
+            }
+            return lt;
+        }
+        return q.notInDatabase(x);
+    }
+
+    fn expectType(q: *Sql, x: *Expr, got: ColType, want: ColType, what: []const u8) Error!void {
+        if (got.eql(want) or (isNumber(got) and isNumber(want) and got.nullable == want.nullable)) return;
+        return q.e.errAtRule(exprText(x) orelse what, .query_type, try std.fmt.allocPrint(q.e.a, "'{s}' wants {s} here, but this is {s}", .{ what, try want.an(q.e.a), try got.an(q.e.a) }));
+    }
+
+    fn notInDatabase(q: *Sql, x: *Expr) Error {
+        return q.e.errAtRule(exprText(x) orelse "", .not_in_database, "this can't run in the database. A query's function can use the fields of the row, values from outside the query, ==, /=, <, <=, >, >=, &&, ||, not, +, -, * and ++. Compute other values before the query and use them in it.");
+    }
+};
+
+fn isComparison(op: []const u8) bool {
+    const ops = [_][]const u8{ "==", "/=", "!=", "<", "<=", ">", ">=" };
+    for (ops) |o| if (std.mem.eql(u8, o, op)) return true;
+    return false;
+}
+
+fn isArith(op: []const u8) bool {
+    return std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "*");
+}
+
+fn isNumber(t: ColType) bool {
+    return t.base == .int or t.base == .float;
+}
+
+fn isNothing(x_in: *Expr) bool {
+    var x = x_in;
+    while (x.* == .paren) x = x.paren;
+    return x.* == .upper and std.mem.eql(u8, x.upper, "Nothing");
+}
+
+fn sqlOp(op: []const u8) []const u8 {
+    if (std.mem.eql(u8, op, "==")) return "=";
+    if (std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "!=")) return "<>";
+    if (std.mem.eql(u8, op, "++")) return "||";
+    return op;
+}
+
+fn literalType(x: *Expr) ?ColType {
+    return switch (x.*) {
+        .string => .{ .base = .str },
+        .literal => |l| if (l.len > 0 and l[0] == '\'') null else if (std.mem.findAny(u8, l, ".eE") != null and !std.mem.startsWith(u8, l, "0x")) .{ .base = .float } else .{ .base = .int },
+        else => null,
+    };
+}
+
+/// Source text to point an error at, for the expressions that have one.
+fn exprText(x_in: *Expr) ?[]const u8 {
+    var x = x_in;
+    while (x.* == .paren) x = x.paren;
+    return switch (x.*) {
+        .ident, .upper, .literal, .string => |s| s,
+        .field => |f| f.name,
+        .binop => |b| b.op,
+        .app => |app| exprText(app.func),
+        .neg, .not => |inner| exprText(inner),
+        .lambda => |l| if (l.body.result) |r| exprText(r) else null,
+        .record => |r| if (r.fields.len > 0) r.fields[0].name else null,
+        else => null,
+    };
+}
+
+/// Whether the name `name` occurs in `x` (so `x` depends on the row).
+fn mentions(x: *const Expr, name: []const u8) bool {
+    return switch (x.*) {
+        .ident => |n| std.mem.eql(u8, n, name),
+        .ident_raw, .upper, .literal, .string, .unit, .underscore => false,
+        .field => |f| mentions(f.target, name),
+        .app => |app| blk: {
+            if (mentions(app.func, name)) break :blk true;
+            for (app.args) |arg| if (mentions(arg, name)) break :blk true;
+            break :blk false;
+        },
+        .binop => |b| mentions(b.lhs, name) or mentions(b.rhs, name),
+        .neg, .not, .try_, .paren => |inner| mentions(inner, name),
+        .lambda => |l| mentionsBlock(l.body, name),
+        .if_ => |f| mentions(f.cond, name) or mentionsBlock(f.then, name) or (f.else_ != null and mentionsBlock(f.else_.?, name)),
+        .case => |c| blk: {
+            if (mentions(c.subject, name)) break :blk true;
+            for (c.arms) |arm| {
+                if (arm.guard) |g| if (mentions(g, name)) break :blk true;
+                if (mentionsBlock(arm.body, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        .list, .tuple => |items| blk: {
+            for (items) |item| if (mentions(item, name)) break :blk true;
+            break :blk false;
+        },
+        .record => |r| blk: {
+            if (r.base) |b| if (mentions(b, name)) break :blk true;
+            for (r.fields) |f| {
+                if (f.value) |v| {
+                    if (mentions(v, name)) break :blk true;
+                } else if (std.mem.eql(u8, f.name, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        .kw => |k| mentions(k.arg, name),
+    };
+}
+
+fn mentionsBlock(b: *const Block, name: []const u8) bool {
+    for (b.stmts) |s| switch (s.kind) {
+        .def => |d| if (mentionsBlock(d.body, name)) return true,
+        .expect => |body| if (mentionsBlock(body, name)) return true,
+        .expr => |x| if (mentions(x, name)) return true,
+        .anno => {},
+    };
+    if (b.result) |r| return mentions(r, name);
+    return false;
+}

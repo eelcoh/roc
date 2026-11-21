@@ -11,6 +11,8 @@ pub const Interface = interface.Interface;
 pub const Diagnostic = translate_mod.Diagnostic;
 pub const Error = translate_mod.Error;
 pub const translate = translate_mod.translate;
+/// The `CREATE TABLE` statements for the tables of a `.punk` file.
+pub const schema = translate_mod.schema;
 
 /// `punk fmt`: lays out punkroc source in its one canonical form.
 pub const format = @import("format.zig");
