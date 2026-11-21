@@ -1,11 +1,17 @@
-//! Roc's values as the compiled app lays them out, and the memory they live in.
+//! Roc's values as a compiled punk app lays them out, and the memory they live in. Shared by
+//! the hosts of punkroc's platforms (`platforms/cli/host`, `platforms/server/host`).
 //!
-//! This is the only module that reads raw memory. It mirrors
-//! `src/builtins/str.zig`, `list.zig` and `utils.zig` of the compiler (64-bit,
-//! little-endian targets only); `platforms/cli/README.md` says what to check
-//! when upstream changes those.
+//! This is the only crate that reads raw memory. It mirrors `src/builtins/str.zig`, `list.zig`
+//! and `utils.zig` of the compiler (64-bit, little-endian targets only); when an upstream merge
+//! changes those, the golden tests and the server spec fail, and this file has to follow.
+//!
+//! Ownership follows Roc: a value handed to the app (an argument of the app's entry point, the
+//! result of a hosted function) is the app's from then on, and a value the app hands over (a
+//! hosted function's argument, the entry point's result) is the host's, freed when it drops.
 
 use std::alloc::{self, Layout};
+use std::cell::Cell;
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
@@ -22,11 +28,27 @@ const _: () = assert!(WORD == 8 && cfg!(target_endian = "little"));
 
 // --- Memory -------------------------------------------------------------------------------------
 
-/// Bytes the app has allocated and not yet freed. Zero when it ends, unless something leaks.
+/// Bytes allocated and not yet freed, by all threads. Zero when a program ends, unless
+/// something leaks.
 static LIVE_BYTES: AtomicIsize = AtomicIsize::new(0);
+
+thread_local! {
+    /// The same, for this thread only: a server checks that one request frees what it allocated.
+    static THREAD_LIVE_BYTES: Cell<isize> = const { Cell::new(0) };
+}
 
 pub fn live_bytes() -> isize {
     LIVE_BYTES.load(Ordering::Relaxed)
+}
+
+/// What this thread allocated minus what it freed.
+pub fn thread_live_bytes() -> isize {
+    THREAD_LIVE_BYTES.with(Cell::get)
+}
+
+fn count(bytes: isize) {
+    LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    THREAD_LIVE_BYTES.with(|c| c.set(c.get() + bytes));
 }
 
 /// `roc_dealloc` is not told the size, so every allocation starts with a prefix that holds it,
@@ -56,7 +78,7 @@ pub fn allocate(length: usize, alignment: usize) -> *mut u8 {
         }
         let data = base.add(pre);
         data.cast::<usize>().sub(1).write(total);
-        LIVE_BYTES.fetch_add(total as isize, Ordering::Relaxed);
+        count(total as isize);
         data
     }
 }
@@ -68,7 +90,7 @@ pub unsafe fn deallocate(data: *mut u8, alignment: usize) {
     // SAFETY: by the caller's promise, the size is in the word before `data`.
     unsafe {
         let total = data.cast::<usize>().sub(1).read();
-        LIVE_BYTES.fetch_sub(total as isize, Ordering::Relaxed);
+        count(-(total as isize));
         alloc::dealloc(data.sub(pre), layout(total, alignment));
     }
 }
@@ -88,7 +110,7 @@ pub unsafe fn reallocate(data: *mut u8, new_length: usize, alignment: usize) -> 
         if base.is_null() {
             out_of_memory();
         }
-        LIVE_BYTES.fetch_add(new_total as isize - total as isize, Ordering::Relaxed);
+        count(new_total as isize - total as isize);
         let data = base.add(pre);
         data.cast::<usize>().sub(1).write(new_total);
         data
@@ -98,7 +120,7 @@ pub unsafe fn reallocate(data: *mut u8, new_length: usize, alignment: usize) -> 
 /// Room for `data_bytes` of a string or list, with its refcount (1) in the word before the data.
 /// A list of refcounted elements also keeps its length in the word before that.
 fn allocate_refcounted(data_bytes: usize, elements_refcounted: bool) -> *mut u8 {
-    let extra = if elements_refcounted { 2 * WORD } else { WORD };
+    let extra = header(elements_refcounted);
     let base = allocate(
         data_bytes
             .checked_add(extra)
@@ -113,26 +135,37 @@ fn allocate_refcounted(data_bytes: usize, elements_refcounted: bool) -> *mut u8 
     }
 }
 
-/// Drops one reference to the string or list data at `alloc_ptr`, and frees it with the last.
+/// The bytes before the data of a string or list: the refcount, and for a list of refcounted
+/// elements also its length.
+fn header(elements_refcounted: bool) -> usize {
+    if elements_refcounted { 2 * WORD } else { WORD }
+}
+
+/// Drops one reference to the string or list data at `alloc_ptr`. Returns true when that was
+/// the last one: the caller then drops the elements, if any, and calls [`free_refcounted`].
 ///
 /// # Safety
-/// `alloc_ptr` is the data pointer of a live refcounted allocation of Roc's, with `extra`
-/// header bytes before it.
-unsafe fn release(alloc_ptr: usize, extra: usize) {
+/// `alloc_ptr` is the data pointer of a live refcounted allocation of Roc's.
+unsafe fn release(alloc_ptr: usize) -> bool {
     if alloc_ptr == 0 {
-        return;
+        return false;
     }
     // SAFETY: by the caller's promise the refcount is the word before the data. Roc may share
     // the value between threads, so the count is updated atomically, as the builtins do.
     unsafe {
         let refcount = &*((alloc_ptr - WORD) as *const AtomicIsize);
         if refcount.load(Ordering::Relaxed) == REFCOUNT_STATIC_DATA {
-            return;
+            return false;
         }
-        if refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
-            deallocate((alloc_ptr - extra) as *mut u8, WORD);
-        }
+        refcount.fetch_sub(1, Ordering::AcqRel) == 1
     }
+}
+
+/// # Safety
+/// `alloc_ptr` is the data pointer of a refcounted allocation whose last reference is gone.
+unsafe fn free_refcounted(alloc_ptr: usize, elements_refcounted: bool) {
+    // SAFETY: by the caller's promise.
+    unsafe { deallocate((alloc_ptr - header(elements_refcounted)) as *mut u8, WORD) }
 }
 
 // --- Str ----------------------------------------------------------------------------------------
@@ -144,6 +177,9 @@ pub struct RocStr {
     capacity_or_alloc_ptr: usize,
     length: usize,
 }
+
+// SAFETY: the reference it owns is counted atomically.
+unsafe impl Send for RocStr {}
 
 impl RocStr {
     pub fn empty() -> Self {
@@ -177,8 +213,8 @@ impl RocStr {
         self.length & SMALL_STR_BIT != 0
     }
 
-    pub fn as_str(&self) -> &str {
-        let bytes = if self.is_small() {
+    pub fn as_bytes(&self) -> &[u8] {
+        if self.is_small() {
             let len = (self.length >> (usize::BITS - 8)) & 0x7f;
             // SAFETY: a small string's bytes are the first `len` bytes of the struct itself.
             unsafe { std::slice::from_raw_parts((self as *const Self).cast::<u8>(), len) }
@@ -187,9 +223,12 @@ impl RocStr {
         } else {
             // SAFETY: a big string's `bytes` points at `length` live bytes.
             unsafe { std::slice::from_raw_parts(self.bytes, self.length) }
-        };
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
         // Roc strings are UTF-8; checking costs one pass and keeps a broken one out of `&str`.
-        std::str::from_utf8(bytes).unwrap_or("\u{FFFD}")
+        std::str::from_utf8(self.as_bytes()).unwrap_or("\u{FFFD}")
     }
 }
 
@@ -205,52 +244,152 @@ impl Drop for RocStr {
         };
         // SAFETY: a big string or a slice of one points into a live string allocation, which
         // has one word (the refcount) before its data.
-        unsafe { release(alloc_ptr, WORD) }
+        unsafe {
+            if release(alloc_ptr) {
+                free_refcounted(alloc_ptr, false);
+            }
+        }
     }
 }
 
-// --- List Str -----------------------------------------------------------------------------------
+// --- List ---------------------------------------------------------------------------------------
 
-/// Roc's `List(Str)`, made by the host and handed to the app, which owns it from then on.
-#[repr(C)]
-pub struct RocList {
-    bytes: *mut u8,
-    length: usize,
-    capacity_or_alloc_ptr: usize,
+/// A value that can be an element of a [`RocList`].
+///
+/// # Safety
+/// `REFCOUNTED` is true exactly when Roc counts references inside the element (a `Str`, a list,
+/// a tuple holding one), and the type has the size, alignment and layout Roc gives the element.
+pub unsafe trait Element {
+    const REFCOUNTED: bool;
 }
 
-impl RocList {
-    pub fn of_strs(items: &[String]) -> Self {
-        if items.is_empty() {
-            return Self {
-                bytes: std::ptr::null_mut(),
-                length: 0,
-                capacity_or_alloc_ptr: 0,
-            };
+// SAFETY: a byte, not refcounted.
+unsafe impl Element for u8 {
+    const REFCOUNTED: bool = false;
+}
+
+// SAFETY: a `Str` holds a reference.
+unsafe impl Element for RocStr {
+    const REFCOUNTED: bool = true;
+}
+
+/// Roc's `(Str, Str)`: two fields of the same alignment keep their order.
+#[repr(C)]
+pub struct RocPair {
+    pub first: RocStr,
+    pub second: RocStr,
+}
+
+// SAFETY: it holds two `Str`s.
+unsafe impl Element for RocPair {
+    const REFCOUNTED: bool = true;
+}
+
+/// Roc's `List(T)`. Owns one reference: dropping it gives that reference back, and with the
+/// last one the elements and the list itself are freed.
+#[repr(C)]
+pub struct RocList<T: Element> {
+    bytes: *mut T,
+    length: usize,
+    capacity_or_alloc_ptr: usize,
+    _elements: PhantomData<T>,
+}
+
+impl<T: Element> RocList<T> {
+    pub fn empty() -> Self {
+        Self {
+            bytes: std::ptr::null_mut(),
+            length: 0,
+            capacity_or_alloc_ptr: 0,
+            _elements: PhantomData,
         }
-        let width = size_of::<RocStr>();
-        let data = allocate_refcounted(items.len() * width, true);
-        // SAFETY: `data` has room for the items; the word two before it holds the length,
-        // for a slice of this list to free it.
+    }
+
+    /// A list of the items, which it owns from now on.
+    pub fn from_vec(items: Vec<T>) -> Self {
+        if items.is_empty() {
+            return Self::empty();
+        }
+        let width = size_of::<T>();
+        assert!(align_of::<T>() <= WORD, "an element aligned beyond a word");
+        let data = allocate_refcounted(items.len() * width, T::REFCOUNTED).cast::<T>();
+        let length = items.len();
+        // SAFETY: `data` has room for the items; for refcounted elements the word two before it
+        // holds the length, for a slice of this list to free them.
         unsafe {
-            data.cast::<usize>().sub(2).write(items.len());
-            for (i, item) in items.iter().enumerate() {
-                data.add(i * width)
-                    .cast::<RocStr>()
-                    .write(RocStr::new(item));
+            if T::REFCOUNTED {
+                data.cast::<usize>().sub(2).write(length);
+            }
+            for (i, item) in items.into_iter().enumerate() {
+                data.add(i).write(item);
             }
         }
         Self {
             bytes: data,
-            length: items.len(),
-            capacity_or_alloc_ptr: items.len() << 1,
+            length,
+            capacity_or_alloc_ptr: length << 1,
+            _elements: PhantomData,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        if self.length == 0 || self.bytes.is_null() {
+            return &[];
+        }
+        // SAFETY: a list's `bytes` points at `length` live elements.
+        unsafe { std::slice::from_raw_parts(self.bytes, self.length) }
+    }
+
+    fn is_slice(&self) -> bool {
+        self.capacity_or_alloc_ptr & SEAMLESS_SLICE_TAG != 0
+    }
+}
+
+impl RocList<u8> {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self::from_vec(bytes.to_vec())
+    }
+}
+
+impl RocList<RocStr> {
+    pub fn of_strs(items: &[String]) -> Self {
+        Self::from_vec(items.iter().map(|item| RocStr::new(item)).collect())
+    }
+}
+
+impl<T: Element> Drop for RocList<T> {
+    fn drop(&mut self) {
+        let alloc_ptr = if self.is_slice() {
+            self.capacity_or_alloc_ptr & !SEAMLESS_SLICE_TAG
+        } else {
+            self.bytes as usize
+        };
+        // SAFETY: a list with data points into a live list allocation of Roc's. When the last
+        // reference goes, every element of the allocation (not only those of a slice) is
+        // dropped: their number is the length, or for a slice the count before the refcount.
+        unsafe {
+            if !release(alloc_ptr) {
+                return;
+            }
+            if T::REFCOUNTED {
+                let count = if self.is_slice() {
+                    (alloc_ptr as *const usize).sub(2).read()
+                } else {
+                    self.length
+                };
+                let first = alloc_ptr as *mut T;
+                for i in 0..count {
+                    std::ptr::drop_in_place(first.add(i));
+                }
+            }
+            free_refcounted(alloc_ptr, T::REFCOUNTED);
         }
     }
 }
 
 // --- Try ----------------------------------------------------------------------------------------
 
-/// `Try(Str, [FileErr(Str)])` and `Try({}, [FileErr(Str)])`: the payload, then the tag. Tags are
+/// `Try(Str, [SomeErr(Str)])` and `Try({}, [SomeErr(Str)])`: the payload, then the tag. Tags are
 /// numbered in alphabetical order: `Err` is 0, `Ok` is 1. For `Ok({})` the payload is unused.
 #[repr(C)]
 pub struct RocTry {
@@ -299,13 +438,18 @@ mod tests {
     }
 
     #[test]
-    fn a_list_frees_nothing_by_itself() {
+    fn lists_free_their_elements() {
+        let before = thread_live_bytes();
         let list = RocList::of_strs(&["a".into(), "a string longer than a small one".into()]);
-        assert_eq!(list.length, 2);
-        // The app frees it; here, by hand: the big string, then the list.
-        unsafe {
-            std::ptr::drop_in_place(list.bytes.add(24).cast::<RocStr>());
-            release(list.bytes as usize, 16);
-        }
+        assert_eq!(list.as_slice()[1].as_str(), "a string longer than a small one");
+        let pairs = RocList::from_vec(vec![RocPair {
+            first: RocStr::new("location"),
+            second: RocStr::new("https://example.com/a/long/enough/path"),
+        }]);
+        let bytes = RocList::from_bytes(b"hello");
+        assert_eq!(bytes.as_slice(), b"hello");
+        assert!(thread_live_bytes() > before);
+        drop((list, pairs, bytes));
+        assert_eq!(thread_live_bytes(), before);
     }
 }

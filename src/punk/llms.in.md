@@ -354,6 +354,71 @@ the path from `Arg.list!`, never write a file name into the program.
 
 Import what you use: `import pf.Stdout`, `import pf.File`, ...
 
+### The server platform
+
+`platforms/server` is for HTTP servers (on ambit's server platform). The app
+is one function, called for every request:
+
+```
+app [handle!] { pf: platform "platforms/server/main.roc", json: "packages/json/main.roc" }
+
+import pf.Http exposing [Request, Response]
+
+handle! : Request => Response
+handle! = fn req ->
+    case req.method of
+        "GET" if req.path == "/hello" -> { status = 200, headers = [], body = Str.toUtf8 "hello\n" }
+        _ -> { status = 404, headers = [], body = [] }
+```
+
+```
+Request : { method : Str, path : Str, query : Str, headers : List (Str, Str), body : List U8 }
+Response : { status : U16, headers : List (Str, Str), body : List U8 }
+Kv.get! : Str => Result (Maybe Str) [KvErr Str]
+Kv.put! : Str -> Str => Result {} [KvErr Str]      -- key, value
+Kv.delete! : Str => Result {} [KvErr Str]
+Clock.now! : () => I64                              -- milliseconds since 1970
+Random.u64! : () => U64
+Config.text! : () => Str                            -- the configuration, JSON: decode it with json.Decode
+Log.info! : Str => {}                               -- also Log.warn!, Log.error!
+```
+
+Header names in a request are lower case. The app has no other way to reach
+the world: no files, no network, no environment. It is not run with
+`punk app.punk`: `punk build` makes an archive that a small Rust crate links
+and tests (see `platforms/server/README.md` and `examples/punk/shortener/`).
+Annotate an effect with more arguments as `Settings -> Str => Result Response _`.
+
+### JSON: the `json` package
+
+Elm's `Json.Decode` and `Json.Encode`, as the modules `Decode` and `Encode`
+of the package `packages/json` (add `json: "packages/json/main.roc"` to the
+app header, relative to your file):
+
+```
+import json.Decode as D
+import json.Encode as E
+
+type alias Link = { url : Str, created : Int }
+
+link : D.Decoder Link
+link =
+    D.map2 (fn url, created -> { url, created })
+        (D.field "url" D.string)
+        (D.field "created" D.int)
+
+D.decodeString link text                    -- Result Link D.Error; D.errorToString for a message
+E.encode 0 (E.object [("url", E.string l.url), ("created", E.int l.created)])
+```
+
+Decoders: `string int float bool null value list keyValuePairs field at index
+maybe nullable oneOf succeed fail map map2 map3 map4 map5 andThen`. Encoders:
+`string int float bool null list object dict`, and `E.encode indent value`.
+There is no `andMap`: use `map2` to `map5`, or `andThen`. `Value` (`import
+json.Value`) is the JSON tree; `Value.parse : Str -> Result Value Str`.
+Do not compare a `Value` or a `D.Error` with `==` (the compiler hangs); compare
+the encoded text instead.
+
 ## Standard library
 
 The functions an Elm or Roc programmer reaches for first. The value a
@@ -391,6 +456,14 @@ Written by an agent that had only this file, on the first try.
 ### Standard input and files
 
 @@example platform/io.punk@@
+
+### JSON decoders and encoders
+
+@@example json/json.punk@@
+
+### A server: ambit's link shortener
+
+@@example shortener/Shortener.punk@@
 
 ## Style
 

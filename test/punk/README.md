@@ -23,8 +23,17 @@ sh test/punk/golden.sh            # check
 sh test/punk/golden.sh --update   # after an intended change in output
 ```
 
+A server app (`examples/punk/shortener/`) can't run as a program: `golden.sh`
+only type-checks it. Its own crate runs it against ambit's spec:
+
+```
+zig build roc
+(cd examples/punk/shortener/server && cargo test)
+```
+
 The `punkroc` workflow (`.github/workflows/punk.yml`) runs these, together
-with `zig test src/punk/test.zig`, on every PR into `punkroc`. On the 1st and
+with `zig test src/punk/test.zig` and the `cargo test`s of the platform hosts and
+the shortener, on every PR into `punkroc`. On the 1st and
 15th of each month it also merges upstream Roc's `main` into a new branch,
 runs the same tests, and opens a PR only when they pass (or an issue when
 they do not).
