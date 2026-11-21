@@ -87,7 +87,7 @@ test "pipes pass the value last" {
         \\    input
         \\    |> List.keepIf isGood
         \\
-        \\ranges = text |> List.mapTry parseRange?
+        \\ranges = text |> try List.mapTry parseRange
         \\
         \\line = name |> greet "Hello"
         \\back = greet "Hi" <| name
@@ -283,7 +283,7 @@ test "comments, headers, effects, try" {
         \\-}
         \\main! = fn args ->
         \\    -- greet everyone
-        \\    name = List.first args?
+        \\    name = try List.first args
         \\    Stdout.line! "Hello, ${name}!"
         \\    Ok {}
     ,
@@ -302,10 +302,10 @@ test "comments, headers, effects, try" {
     );
 }
 
-test "postfix try binds to the whole call" {
+test "try binds to the whole call" {
     try check(
         \\f = fn a ->
-        \\    x = U64.fromStr a?
+        \\    x = try U64.fromStr a
         \\    Ok x
     ,
         \\f = |a| {
@@ -314,6 +314,38 @@ test "postfix try binds to the whole call" {
         \\}
         \\
     );
+}
+
+test "try inside tuples, operators and pipelines" {
+    try check(
+        \\pair = fn a, b -> Ok (try parse a, try parse b)
+        \\
+        \\product = fn x, y -> Ok (try number x * try number y)
+        \\
+        \\ranges = fn input ->
+        \\    input
+        \\        |> Str.trim
+        \\        |> Str.splitOn ","
+        \\        |> try List.mapTry parseRange
+        \\        |> List.len
+        \\        |> Ok
+        \\
+        \\whole = fn s -> try (s |> Str.trim |> parse)
+    ,
+        \\pair = |a, b| Ok((parse(a)?, parse(b)?))
+        \\
+        \\product = |x, y| Ok(number(x)? * number(y)?)
+        \\
+        \\ranges = |input| Ok(List.len(List.map_try(Str.split_on(Str.trim(input), ","), parse_range)?))
+        \\
+        \\whole = |s| parse(Str.trim(s))?
+        \\
+    );
+}
+
+test "a postfix ? points to try" {
+    try checkError("f = fn a ->\n    x = U64.fromStr a?\n    Ok x\n", 2, "'try f x' instead of 'f x?'");
+    try checkError("f = fn a -> g try a\n", 1, "unexpected");
 }
 
 test "operators" {

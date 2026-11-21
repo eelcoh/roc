@@ -14,9 +14,9 @@ main! = fn () ->
         Err _ -> {}
 
 run! = fn () ->
-    part1Demo = part1! demoInput?
+    part1Demo = try part1! demoInput
     Stdout.line! "-----------"
-    part2Demo = part2! demoInput?
+    part2Demo = try part2! demoInput
     Stdout.line! "-----------"
     Stdout.line! "Part 1 (demo): ${U64.toStr part1Demo}"
     Stdout.line! "Part 2 (demo): ${U64.toStr part2Demo}"
@@ -33,7 +33,7 @@ part2! = fn input ->
 solve = fn input, findInvalid ->
     var allInvalid = []
     for rangeStr in Str.splitOn "," (Str.trim input)
-        range = parseRange rangeStr?
+        range = try parseRange rangeStr
         var rangeInvalid = []
 
         -- Split by digit count and process each sub-range
@@ -55,7 +55,7 @@ dedup = fn list ->
 parseRange : Str -> Try (U64, U64) _
 parseRange = fn rangeStr ->
     case Str.splitOn "-" rangeStr of
-        [a, b] -> Ok (U64.fromStr a?, U64.fromStr b?)
+        [a, b] -> Ok (try U64.fromStr a, try U64.fromStr b)
         _ -> Err InvalidRangeFormat
 
 -- Split a range into sub-ranges where all numbers have the same digit count

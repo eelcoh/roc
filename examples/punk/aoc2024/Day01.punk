@@ -27,13 +27,13 @@ parse = fn input ->
     pairs =
         input
             |> Str.splitOn "\n"
-            |> List.mapTry parseLine?
+            |> try List.mapTry parseLine
     Ok (List.map .0 pairs, List.map .1 pairs)
 
 parseLine : Str -> Result (U64, U64) _
 parseLine = fn line ->
     case line |> Str.splitOn " " |> List.dropIf Str.isEmpty of
-        [a, b] -> Ok (U64.fromStr a?, U64.fromStr b?)
+        [a, b] -> Ok (try U64.fromStr a, try U64.fromStr b)
         _ -> Err (BadLine line)
 
 part1 : List U64 -> List U64 -> U64
