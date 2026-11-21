@@ -4,6 +4,9 @@ import pf.Stdout
 
 {-| Advent of Code 2025, day 2, in a functional punkroc style.
 Same answers as aoc_day2.punk, without var, for or while.
+
+Builtins take the value they work on last, as in Elm, so `|>` and
+partial application (`invalidIds divisorsFor`) fit together.
 -}
 
 demoInput = "11-22,95-115,998-1012,1188511880-1188511890,222220-222224,1698522-1698528,446443-446449,38593856-38593862,565653-565659,824824821-824824827,2121212118-2121212124"
@@ -14,8 +17,8 @@ main! = fn () ->
         Err _ -> {}
 
 run! = fn () ->
-    part1Demo = solve demoInput part1Divisors?
-    part2Demo = solve demoInput properDivisors?
+    part1Demo = solve part1Divisors demoInput?
+    part2Demo = solve properDivisors demoInput?
     Stdout.line! "Part 1 (demo): ${U64.toStr part1Demo}"
     Stdout.line! "Part 2 (demo): ${U64.toStr part2Demo}"
     Ok {}
@@ -23,13 +26,17 @@ run! = fn () ->
 {-| Parse the ranges, find the invalid ids in each, and add up the unique ones.
 `divisorsFor` decides which pattern lengths count for a number of digits.
 -}
-solve : Str, (U64 -> List U64) -> Try U64 _
-solve = fn input, divisorsFor ->
-    ranges = Str.splitOn (Str.trim input) "," |> List.mapTry parseRange?
+solve : (U64 -> List U64) -> Str -> Try U64 _
+solve = fn divisorsFor, input ->
+    ranges =
+        input
+            |> Str.trim
+            |> Str.splitOn ","
+            |> List.mapTry parseRange?
 
     ranges
         |> List.joinMap splitByDigitCount
-        |> List.joinMap (fn range -> invalidIds range divisorsFor)
+        |> List.joinMap (invalidIds divisorsFor)
         |> Set.fromList
         |> Set.toList
         |> List.sum
@@ -37,7 +44,7 @@ solve = fn input, divisorsFor ->
 
 parseRange : Str -> Try (U64, U64) _
 parseRange = fn rangeStr ->
-    case Str.splitOn rangeStr "-" of
+    case Str.splitOn "-" rangeStr of
         [a, b] -> Ok (U64.fromStr a?, U64.fromStr b?)
         _ -> Err InvalidRangeFormat
 
@@ -49,7 +56,8 @@ splitByDigitCount = fn (start, end) ->
         [(start, end)]
     else
         boundary = U64.pow 10 digits - 1
-        List.append (splitByDigitCount (boundary + 1, end)) (start, boundary)
+        splitByDigitCount (boundary + 1, end)
+            |> List.append (start, boundary)
 
 countDigits : U64 -> U64
 countDigits = fn n ->
@@ -65,20 +73,24 @@ properDivisors : U64 -> List U64
 properDivisors = fn n ->
     1..=(n // 2)
         |> Range.iter
-        |> Iter.keepIf (fn d -> n % d == 0)
+        |> Iter.keepIf (isDivisorOf n)
         |> List.fromIter
 
-invalidIds : (U64, U64), (U64 -> List U64) -> List U64
-invalidIds = fn (start, end), divisorsFor ->
+isDivisorOf : U64 -> U64 -> Bool
+isDivisorOf = fn n, d ->
+    n % d == 0
+
+invalidIds : (U64 -> List U64) -> (U64, U64) -> List U64
+invalidIds = fn divisorsFor, (start, end) ->
     digits = countDigits start
     divisorsFor digits
-        |> List.joinMap (fn len -> repeating len digits start end)
+        |> List.joinMap (repeating digits start end)
 
 {-| All numbers in [start, end] made of one pattern of `len` digits repeated.
 Pattern P repeated gives P * (10^digits - 1) / (10^len - 1).
 -}
-repeating : U64, U64, U64, U64 -> List U64
-repeating = fn len, digits, start, end ->
+repeating : U64 -> U64 -> U64 -> U64 -> List U64
+repeating = fn digits, start, end, len ->
     multiplier = (U64.pow 10 digits - 1) // (U64.pow 10 len - 1)
     shift = U64.pow 10 (digits - len)
 
