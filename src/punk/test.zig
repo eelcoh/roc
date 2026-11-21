@@ -985,3 +985,60 @@ test "error messages use punkroc's names" {
     try std.testing.expectEqual(null, try mod.camelText(a, "prefix it like _unused_name"));
     try std.testing.expectEqual(null, try mod.camelText(a, "in examples/punk/aoc_day2.punk"));
 }
+
+test "Elm names: renames, helpers and types" {
+    try check(
+        \\big : List Int -> Maybe Int
+        \\big = fn xs ->
+        \\    xs
+        \\        |> List.filter (fn n -> n > 2)
+        \\        |> List.head
+        \\
+        \\firsts = fn ps ->
+        \\    List.map Tuple.first ps
+        \\
+        \\second = fn p ->
+        \\    Tuple.second p
+    ,
+        \\big : List(I64) -> [Just(I64), Nothing]
+        \\big = |xs| punk_list_head(List.keep_if(xs, |n| n > 2))
+        \\
+        \\firsts = |ps| List.map(ps, (|punk_t0| punk_t0.0))
+        \\
+        \\second = |p| p.1
+        \\
+        \\punk_list_head = |xs| match List.first(xs) { Ok(x) => Just(x), Err(_) => Nothing }
+        \\
+    );
+}
+
+test "Elm names: the file's own definitions win" {
+    try check(
+        \\type Order = Up | Down
+        \\
+        \\compare = fn a, b ->
+        \\    Up
+        \\
+        \\x : Order
+        \\x = compare 1 2
+    ,
+        \\Order := [Up, Down].{
+        \\    is_eq = |punk_x, punk_y| match (punk_x, punk_y) {
+        \\        (Up, Up) => True
+        \\        (Down, Down) => True
+        \\        _ => False
+        \\    }
+        \\
+        \\    to_hash = |punk_x, punk_h| match punk_x {
+        \\        Up => Hasher.write_u64(punk_h, 0)
+        \\        Down => Hasher.write_u64(punk_h, 1)
+        \\    }
+        \\}
+        \\
+        \\compare = |a, b| Up
+        \\
+        \\x : Order
+        \\x = compare(1, 2)
+        \\
+    );
+}

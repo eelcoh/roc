@@ -13,6 +13,7 @@
 //! Generated from src/build/roc/Builtin.roc; see `gen_stdlib.py`.
 
 const std = @import("std");
+const elm = @import("elm.zig");
 
 /// How punkroc's argument order maps to Roc's.
 pub const Order = enum {
@@ -59,8 +60,9 @@ pub fn lookup(roc_name: []const u8) ?Fn {
 
 /// Rewrites a qualified Roc name for the Result aliases. Returns the name
 /// unchanged when it is not a Result function.
+/// Elm names Roc has under another name (`List.filter`) are renamed too.
 pub fn rocName(name: []const u8) []const u8 {
-    return aliases.get(name) orelse name;
+    return aliases.get(name) orelse elm.rename(name);
 }
 
 const aliases = std.StaticStringMap([]const u8).initComptime(.{

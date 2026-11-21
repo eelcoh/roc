@@ -239,6 +239,35 @@ use parentheses for more: `try (s |> Str.trim |> parse)`. In a pipeline
 `|> try f a` checks the result after piping. A postfix `?` is a syntax error
 that points to `try`.
 
+## Elm's names and types
+
+Elm's standard names work next to Roc's (`src/punk/elm.zig`):
+
+| Elm | in Roc |
+|-----|--------|
+| `List.filter`, `foldl`, `foldr`, `reverse`, `member`, `concatMap` | `List.keep_if`, `fold`, `fold_rev`, `rev`, `contains`, `join_map` |
+| `List.range`, `head`, `tail`, `maximum`, `minimum`, `length`, `indexedMap`, `take`, `drop`, `singleton` | small helpers |
+| `List.sortWith` | takes `LT \| EQ \| GT`, as in Elm (Roc's wants `Before \| Same \| After`) |
+| `Tuple.first`, `second`, `pair`, `mapFirst`, `mapSecond` | `t.0`, `t.1`, ... |
+| `Maybe.withDefault`, `map`, `andThen`, `Result.toMaybe`, `Result.fromMaybe` | helpers on `Just x \| Nothing` |
+| `String.split`, `join`, `trim`, `isEmpty`, `contains`, `startsWith`, `endsWith`, `toUpper`, `toLower`, `replace`, `trimLeft`, `trimRight` | the `Str` functions |
+| `String.length`, `lines`, `words`, `toInt`, `fromInt`, `append`, `concat`, `repeat` | helpers |
+| `compare`, `min`, `max`, `identity` | helpers |
+
+A helper is a short Roc definition added to the end of the translation when
+the file uses it (`punk_list_head`). The file's own definitions and imports
+win: a file with its own `compare` keeps it.
+
+Types: `Int` is `I64`, `Float` is `F64`, `Maybe a` is `[Just(a), Nothing]`
+and `Order` is `[LT, EQ, GT]`, unless the file defines a type of that name.
+The Elm functions count with `Int` (`List.length`, `List.range`, the index
+of `List.indexedMap`); Roc's own keep `U64` (`List.len`). `toInt` turns a
+`U64` into an `Int` and `fromInt` back, for `List.len` and `List.get`;
+`toFloat` turns an `Int` into a `Float`.
+
+Roc's functions that may fail keep returning a `Result` (`List.first`,
+`Dict.get`); the Elm-only ones return a `Maybe` (`List.head`, `String.toInt`).
+
 ## Smaller Elm habits
 
 - **Accessor functions.** `.name` on its own is `fn r -> r.name`:
