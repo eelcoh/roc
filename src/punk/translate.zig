@@ -3,10 +3,17 @@
 //! The pipeline is lex -> parse (layout-sensitive, Elm-style offside rule)
 //! -> emit Roc text. Everything is allocated in one arena owned by the caller.
 //!
-//! Step 2 of the punkroc plan: syntax only. Semantics stay Roc's, so `|>`
-//! still passes the value as the FIRST argument (`x |> f a` == `f(x, a)`).
+//! Step 3 of the punkroc plan adds Elm's semantics on top of Roc:
+//! - `|>` passes the value as the LAST argument (`x |> f a` == `f a x`);
+//! - builtins take the value they work on last (`List.map f xs`), see stdlib.zig;
+//! - functions are curried: `add 1` is a function when `add` takes two
+//!   arguments. The emitter knows the arity of every function defined in the
+//!   file and of the builtins, and writes partial applications as lambdas.
+//!   Functions it knows nothing about (lambda parameters, other modules) are
+//!   called with all their arguments at once, as in Roc.
 
 const std = @import("std");
+const stdlib = @import("stdlib.zig");
 const Allocator = std.mem.Allocator;
 
 /// Where and why translation failed.
@@ -382,6 +389,7 @@ pub fn lex(a: Allocator, src: []const u8, diag: *Diagnostic) Error![]Token {
 /// A punkroc expression.
 pub const Expr = union(enum) {
     ident: []const u8, // lower or qualified lower (List.map)
+    ident_raw: []const u8, // a name the emitter made up, written as-is
     upper: []const u8, // tag or qualified tag
     literal: []const u8, // int, float, char
     string: []const u8, // raw, including quotes
@@ -788,11 +796,11 @@ const Parser = struct {
             if (rhs.* == .try_) {
                 return p.new(Expr, .{ .try_ = try p.makeBinop(op, lhs, rhs.try_) });
             }
-            // data-first: x |> f a  ==  f(x, a)
+            // data-last, as in Elm: x |> f a  ==  f a x
             if (rhs.* == .app) {
                 var args: std.ArrayList(*Expr) = .empty;
-                try args.append(p.a, lhs);
                 try args.appendSlice(p.a, rhs.app.args);
+                try args.append(p.a, lhs);
                 return p.new(Expr, .{ .app = .{ .func = rhs.app.func, .args = args.items } });
             }
             return p.new(Expr, .{ .app = .{ .func = rhs, .args = try p.a.dupe(*Expr, &.{lhs}) } });
@@ -1226,7 +1234,7 @@ const Parser = struct {
                 });
                 break :blk p.new(Pattern, .{ .record = fields.items });
             },
-            .field, .binop, .neg, .not, .try_, .lambda, .if_, .case, .kw => p.errAt(at_tok, "the left side of '=' must be a name or a pattern", .{}),
+            .ident_raw, .field, .binop, .neg, .not, .try_, .lambda, .if_, .case, .kw => p.errAt(at_tok, "the left side of '=' must be a name or a pattern", .{}),
         };
     }
 
@@ -1396,6 +1404,13 @@ const Emitter = struct {
     buf: std.ArrayList(u8) = .empty,
     indent: u32 = 0,
     vars: std.ArrayList([]const u8) = .empty,
+    /// Names in scope, innermost last, with the arity of the function they
+    /// hold when the emitter knows it (null: not a known function).
+    scope: std.ArrayList(Binding) = .empty,
+    /// Counter for the names of generated lambda parameters.
+    fresh: u32 = 0,
+
+    const Binding = struct { name: []const u8, arity: ?u8, anno: bool = false };
 
     fn w(e: *Emitter, s: []const u8) Error!void {
         try e.buf.appendSlice(e.a, s);
@@ -1419,6 +1434,7 @@ const Emitter = struct {
     /// definitions inside the block. When the module declares `type Name`,
     /// that type carries the block.
     fn emitModule(e: *Emitter, items: []Item) Error!void {
+        try e.bindItems(items);
         const module_name = moduleHeaderName(items) orelse {
             try e.emitItems(items);
             try e.w("\n");
@@ -1490,11 +1506,7 @@ const Emitter = struct {
                     try e.w(" : ");
                     try e.emitType(an.ty, false);
                 },
-                .def => |d| {
-                    try e.emitPattern(d.pat);
-                    try e.w(" = ");
-                    try e.emitBody(d.body);
-                },
+                .def => |d| try e.emitDef(d.pat, d.body),
                 .type_alias => |ta| {
                     try e.emitTypeHead(ta.name, ta.params);
                     try e.w(" : ");
@@ -1551,6 +1563,8 @@ const Emitter = struct {
     fn emitBlockLines(e: *Emitter, b: *Block) Error!void {
         const vars_mark = e.vars.items.len;
         defer e.vars.items.len = vars_mark;
+        const scope_mark = e.scope.items.len;
+        defer e.scope.items.len = scope_mark;
         e.indent += 1;
         defer e.indent -= 1;
         for (b.stmts) |s| {
@@ -1572,9 +1586,8 @@ const Emitter = struct {
     fn emitStmt(e: *Emitter, s: Stmt) Error!void {
         switch (s.kind) {
             .def => |d| {
-                try e.emitPattern(d.pat);
-                try e.w(" = ");
-                try e.emitBody(d.body);
+                try e.bindDef(d.pat, d.body);
+                try e.emitDef(d.pat, d.body);
             },
             .var_def => |v| {
                 const name = try snake(e.a, v.name);
@@ -1585,6 +1598,7 @@ const Emitter = struct {
                 try e.vars.append(e.a, name);
             },
             .anno => |an| {
+                try e.scope.append(e.a, .{ .name = try snake(e.a, an.name), .arity = typeArity(an.ty), .anno = true });
                 try e.w(try snake(e.a, an.name));
                 try e.w(" : ");
                 try e.emitType(an.ty, false);
@@ -1594,6 +1608,9 @@ const Emitter = struct {
                 try e.emitPattern(f.pat);
                 try e.w(" in ");
                 try e.emitExpr(f.iter);
+                const scope_mark = e.scope.items.len;
+                defer e.scope.items.len = scope_mark;
+                try e.bindPattern(f.pat);
                 try e.w(" {");
                 try e.emitBlockLines(f.body);
                 try e.nl();
@@ -1627,14 +1644,327 @@ const Emitter = struct {
     }
 
     fn emitIdent(e: *Emitter, raw: []const u8) Error!void {
-        const name = try snakeQualified(e.a, raw);
+        const name = stdlib.rocName(try snakeQualified(e.a, raw));
         if (e.isVar(name)) try e.w("$");
         try e.w(name);
     }
 
+    // currying
+
+    /// Binds the top-level definitions before anything is emitted, so a
+    /// function can be partially applied above its definition.
+    fn bindItems(e: *Emitter, items: []const Item) Error!void {
+        for (items) |item| switch (item.kind) {
+            .anno => |an| try e.scope.append(e.a, .{ .name = try snake(e.a, an.name), .arity = typeArity(an.ty), .anno = true }),
+            .def => |d| try e.bindDef(d.pat, d.body),
+            .raw, .type_alias, .type_nominal, .expect => {},
+        };
+    }
+
+    /// Binds the names a definition introduces. A definition without an
+    /// arity of its own (`f = g`) keeps the arity of its annotation.
+    fn bindDef(e: *Emitter, pat: *Pattern, body: *Block) Error!void {
+        if (pat.* != .ident) return e.bindPattern(pat);
+        const name = try snake(e.a, pat.ident);
+        var arity: ?u8 = null;
+        if (body.stmts.len == 0) if (body.result) |r| {
+            arity = try e.exprArity(r);
+        };
+        const anno = e.annoArity(name);
+        if (arity == null or (try e.etaExtra(pat, body)) > 0) arity = anno;
+        try e.scope.append(e.a, .{ .name = name, .arity = arity });
+    }
+
+    /// The arity of the annotation in scope for `name`, if any.
+    fn annoArity(e: *Emitter, name: []const u8) ?u8 {
+        var i = e.scope.items.len;
+        while (i > 0) {
+            i -= 1;
+            const b = e.scope.items[i];
+            if (b.anno and std.mem.eql(u8, b.name, name)) return b.arity;
+        }
+        return null;
+    }
+
+    /// How many parameters a function definition lacks compared to its
+    /// annotation: `pick : Bool -> I64 -> I64 -> I64` with
+    /// `pick = fn useAdd -> ...` lacks two.
+    fn etaExtra(e: *Emitter, pat: *Pattern, body: *Block) Error!usize {
+        if (pat.* != .ident or body.stmts.len != 0) return 0;
+        const r = body.result orelse return 0;
+        if (r.* != .lambda) return 0;
+        const anno = e.annoArity(try snake(e.a, pat.ident)) orelse return 0;
+        const own = (try e.flatLambda(r)).params.len;
+        return if (anno > own) anno - own else 0;
+    }
+
+    /// A definition. A function that takes fewer parameters than its
+    /// annotation gets the rest as extra parameters, passed on to what it
+    /// returns, so Roc sees the arity of the annotation.
+    fn emitDef(e: *Emitter, pat: *Pattern, body: *Block) Error!void {
+        try e.emitPattern(pat);
+        try e.w(" = ");
+        const extra = try e.etaExtra(pat, body);
+        if (extra == 0) return e.emitBody(body);
+
+        const flat = try e.flatLambda(body.result.?);
+        const scope_mark = e.scope.items.len;
+        defer e.scope.items.len = scope_mark;
+        var args: std.ArrayList(*Expr) = .empty;
+        try e.w("|");
+        for (flat.params, 0..) |prm, i| {
+            if (i > 0) try e.w(", ");
+            try e.emitPattern(prm);
+            try e.bindPattern(prm);
+        }
+        for (0..extra) |_| {
+            e.fresh += 1;
+            const name = try std.fmt.allocPrint(e.a, "punk_a{d}", .{e.fresh});
+            try e.w(", ");
+            try e.w(name);
+            try args.append(e.a, try e.newExpr(.{ .ident_raw = name }));
+        }
+        try e.w("| ");
+        const result = flat.body.result orelse return e.errAt0("a function body must end in an expression");
+        const call = try e.newExpr(.{ .app = .{ .func = try e.newExpr(.{ .paren = result }), .args = args.items } });
+        var block = Block{ .stmts = flat.body.stmts, .result = call, .result_blank_before = flat.body.result_blank_before };
+        try e.emitBody(&block);
+    }
+
+    fn errAt0(e: *Emitter, message: []const u8) Error {
+        e.diag.message = message;
+        return error.ParseError;
+    }
+
+    /// Binds every name in a pattern as a value of unknown arity, which also
+    /// hides outer functions of the same name.
+    fn bindPattern(e: *Emitter, pat: *Pattern) Error!void {
+        switch (pat.*) {
+            .ident => |n| try e.scope.append(e.a, .{ .name = try snake(e.a, n), .arity = null }),
+            .tag => |t| for (t.args) |sub| try e.bindPattern(sub),
+            .record => |fields| for (fields) |f| {
+                if (f.pat) |sub| try e.bindPattern(sub) else try e.scope.append(e.a, .{ .name = try snake(e.a, f.name), .arity = null });
+            },
+            .list, .tuple => |items| for (items) |sub| try e.bindPattern(sub),
+            .rest => |n| if (n) |name| try e.scope.append(e.a, .{ .name = try snake(e.a, name), .arity = null }),
+            .as_ => |as_| {
+                try e.bindPattern(as_.pat);
+                try e.scope.append(e.a, .{ .name = try snake(e.a, as_.name), .arity = null });
+            },
+            .underscore, .literal, .string, .unit => {},
+        }
+    }
+
+    fn lookup(e: *Emitter, name: []const u8) ?u8 {
+        var i = e.scope.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, e.scope.items[i].name, name)) return e.scope.items[i].arity;
+        }
+        return null;
+    }
+
+    const Callee = struct { f: stdlib.Fn, builtin: bool };
+
+    /// What the emitter knows about the function an expression names.
+    fn calleeArity(e: *Emitter, x: *const Expr) Error!?Callee {
+        switch (x.*) {
+            .ident => |raw| {
+                const name = stdlib.rocName(try snakeQualified(e.a, raw));
+                if (std.mem.findScalar(u8, name, '.') != null) {
+                    const f = stdlib.lookup(name) orelse return null;
+                    return .{ .f = f, .builtin = true };
+                }
+                const n = e.lookup(name) orelse return null;
+                return .{ .f = .{ .arity = n, .order = .none }, .builtin = false };
+            },
+            .paren => |inner| return e.calleeArity(inner),
+            .ident_raw, .upper, .literal, .string, .unit, .underscore, .field, .app, .binop, .neg, .not, .try_, .lambda, .if_, .case, .list, .tuple, .record, .kw => return null,
+        }
+    }
+
+    /// How many more arguments an expression takes before it is evaluated,
+    /// when the emitter can tell.
+    fn exprArity(e: *Emitter, x: *Expr) Error!?u8 {
+        switch (x.*) {
+            .lambda => return @intCast((try e.flatLambda(x)).params.len),
+            .paren => |inner| return e.exprArity(inner),
+            .app => {
+                const call = try e.flatCall(x.app.func, x.app.args);
+                const callee = try e.calleeArity(call.func) orelse return null;
+                if (call.args.len >= callee.f.arity) return null;
+                return @intCast(callee.f.arity - call.args.len);
+            },
+            .ident => return if (try e.calleeArity(x)) |c| c.f.arity else null,
+            .ident_raw, .upper, .literal, .string, .unit, .underscore, .field, .binop, .neg, .not, .try_, .if_, .case, .list, .tuple, .record, .kw => return null,
+        }
+    }
+
+    const FlatLambda = struct { params: []*Pattern, body: *Block };
+
+    /// `fn a -> fn b -> body` as one lambda with parameters `a, b`.
+    fn flatLambda(e: *Emitter, x: *Expr) Error!FlatLambda {
+        var params: std.ArrayList(*Pattern) = .empty;
+        var cur = x;
+        while (true) {
+            try params.appendSlice(e.a, cur.lambda.params);
+            const body = cur.lambda.body;
+            if (body.stmts.len == 0) if (body.result) |r| if (r.* == .lambda) {
+                cur = r;
+                continue;
+            };
+            return .{ .params = params.items, .body = body };
+        }
+    }
+
+    const FlatCall = struct { func: *Expr, args: []*Expr };
+
+    /// `(f a) b` is `f a b`, and `f ()` passes no arguments.
+    fn flatCall(e: *Emitter, func: *Expr, args: []*Expr) Error!FlatCall {
+        var f = func;
+        var all: []*Expr = if (args.len == 1 and args[0].* == .unit) &.{} else args;
+        while (true) {
+            const inner = if (f.* == .paren) f.paren else f;
+            if (inner.* != .app) break;
+            const inner_args: []*Expr = if (inner.app.args.len == 1 and inner.app.args[0].* == .unit) &.{} else inner.app.args;
+            all = try std.mem.concat(e.a, *Expr, &.{ inner_args, all });
+            f = inner.app.func;
+        }
+        return .{ .func = f, .args = all };
+    }
+
+    /// A call. Known functions get exactly their arity: extra arguments go
+    /// to the function they return, missing ones make a lambda. Builtins get
+    /// their arguments in Roc's order. Unknown functions get all arguments.
+    fn emitCall(e: *Emitter, func_in: *Expr, args_in: []*Expr) Error!void {
+        const call = try e.flatCall(func_in, args_in);
+        const func = call.func;
+        const args = call.args;
+        const callee = try e.calleeArity(func) orelse {
+            try e.emitCallee(func);
+            return e.emitArgs(args, null);
+        };
+        const n: usize = callee.f.arity;
+        if (args.len >= n) {
+            try e.emitCallee(func);
+            try e.emitArgs(args[0..n], callee.f);
+            if (args.len > n) try e.emitArgs(args[n..], null);
+            return;
+        }
+
+        // Partial application: arguments that are not plain values are
+        // computed once, before the lambda, as Elm would.
+        var full: std.ArrayList(*Expr) = .empty;
+        var bound: std.ArrayList(struct { name: []const u8, value: *Expr }) = .empty;
+        for (args) |arg| {
+            if (try e.isPlain(arg)) {
+                try full.append(e.a, arg);
+                continue;
+            }
+            e.fresh += 1;
+            const name = try std.fmt.allocPrint(e.a, "punk_v{d}", .{e.fresh});
+            try bound.append(e.a, .{ .name = name, .value = arg });
+            try full.append(e.a, try e.newExpr(.{ .ident_raw = name }));
+        }
+        var params: std.ArrayList([]const u8) = .empty;
+        for (args.len..n) |_| {
+            e.fresh += 1;
+            const name = try std.fmt.allocPrint(e.a, "punk_a{d}", .{e.fresh});
+            try params.append(e.a, name);
+            try full.append(e.a, try e.newExpr(.{ .ident_raw = name }));
+        }
+        if (bound.items.len > 0) {
+            try e.w("{");
+            e.indent += 1;
+            for (bound.items) |b| {
+                try e.nl();
+                try e.w(b.name);
+                try e.w(" = ");
+                try e.emitExpr(b.value);
+            }
+            try e.nl();
+        }
+        try e.w("|");
+        for (params.items, 0..) |prm, i| {
+            if (i > 0) try e.w(", ");
+            try e.w(prm);
+        }
+        try e.w("| ");
+        try e.emitCallee(func);
+        try e.emitArgs(full.items, callee.f);
+        if (bound.items.len > 0) {
+            e.indent -= 1;
+            try e.nl();
+            try e.w("}");
+        }
+    }
+
+    fn newExpr(e: *Emitter, v: Expr) Error!*Expr {
+        const x = try e.a.create(Expr);
+        x.* = v;
+        return x;
+    }
+
+    /// Values that are cheap to compute again: these go into a partial
+    /// application's lambda as they are. A partial application is itself a
+    /// lambda, so it is plain when its arguments are.
+    fn isPlain(e: *Emitter, x: *Expr) Error!bool {
+        return switch (x.*) {
+            .ident, .ident_raw, .upper, .literal, .unit, .underscore, .lambda => true,
+            .string => |s| std.mem.find(u8, s, "${") == null,
+            .field => |f| e.isPlain(f.target),
+            .paren => |inner| e.isPlain(inner),
+            .app => |app| {
+                if (try e.exprArity(x) == null) return false;
+                for (app.args) |arg| if (!try e.isPlain(arg)) return false;
+                return true;
+            },
+            .binop, .neg, .not, .try_, .if_, .case, .list, .tuple, .record, .kw => false,
+        };
+    }
+
+    fn emitCallee(e: *Emitter, func: *Expr) Error!void {
+        const f = if (func.* == .paren and func.paren.* == .ident) func.paren else func;
+        if (f.* == .ident) return e.emitIdent(f.ident);
+        if (f.* == .lambda or !isAtomic(f)) {
+            try e.w("(");
+            try e.emitExpr(f);
+            try e.w(")");
+        } else try e.emitExpr(f);
+    }
+
+    /// `(a, b)`, in Roc's order when `order` is a builtin's.
+    fn emitArgs(e: *Emitter, args: []*Expr, order: ?stdlib.Fn) Error!void {
+        try e.w("(");
+        for (0..args.len) |i| {
+            if (i > 0) try e.w(", ");
+            const src = if (order) |f| f.source(i) else i;
+            try e.emitItem(args[src]);
+        }
+        try e.w(")");
+    }
+
+    /// The number of arguments a function type takes. `A -> B -> C` takes
+    /// two: types are curried, as in Elm.
+    fn typeArity(t: *const Type) ?u8 {
+        var cur = t;
+        var n: usize = 0;
+        var is_func = false;
+        while (true) {
+            while (cur.* == .paren) cur = cur.paren;
+            if (cur.* != .func) break;
+            const f = cur.func;
+            is_func = true;
+            if (!(f.args.len == 1 and f.args[0].* == .unit)) n += f.args.len;
+            cur = f.ret;
+        }
+        if (!is_func) return null;
+        return @intCast(n);
+    }
+
     fn isAtomic(x: *const Expr) bool {
         return switch (x.*) {
-            .ident, .upper, .literal, .string, .unit, .underscore, .field, .app, .list, .tuple, .paren, .record, .try_ => true,
+            .ident, .ident_raw, .upper, .literal, .string, .unit, .underscore, .field, .app, .list, .tuple, .paren, .record, .try_ => true,
             .binop, .neg, .not, .lambda, .if_, .case, .kw => false,
         };
     }
@@ -1660,7 +1990,7 @@ const Emitter = struct {
                 break :blk info.prec < parent_prec or (info.prec == parent_prec and right_side);
             },
             .lambda, .if_, .case, .kw => true,
-            .ident, .upper, .literal, .string, .unit, .underscore, .field, .app, .neg, .not, .try_, .list, .tuple, .paren, .record => false,
+            .ident, .ident_raw, .upper, .literal, .string, .unit, .underscore, .field, .app, .neg, .not, .try_, .list, .tuple, .paren, .record => false,
         };
         if (needs) try e.w("(");
         try e.emitExpr(child);
@@ -1676,8 +2006,17 @@ const Emitter = struct {
 
     fn emitExpr(e: *Emitter, x: *Expr) Error!void {
         switch (x.*) {
-            .ident => |name| try e.emitIdent(name),
-            .upper, .literal => |s| try e.w(s),
+            .ident => |name| {
+                // A builtin whose arguments punkroc reorders, used as a value
+                // (`List.map` on its own): a lambda that reorders them.
+                if (try e.calleeArity(x)) |callee| {
+                    if (callee.builtin and callee.f.order != .none and callee.f.arity >= 2) {
+                        return e.emitCall(x, &.{});
+                    }
+                }
+                try e.emitIdent(name);
+            },
+            .ident_raw, .upper, .literal => |s| try e.w(s),
             .string => |s| try e.emitString(s),
             .unit => try e.w("{}"),
             .underscore => try e.w("_"),
@@ -1686,21 +2025,7 @@ const Emitter = struct {
                 try e.w(".");
                 try e.w(try snake(e.a, f.name));
             },
-            .app => |app| {
-                if (app.func.* == .lambda or !isAtomic(app.func)) {
-                    try e.w("(");
-                    try e.emitExpr(app.func);
-                    try e.w(")");
-                } else try e.emitExpr(app.func);
-                try e.w("(");
-                if (!(app.args.len == 1 and app.args[0].* == .unit)) {
-                    for (app.args, 0..) |arg, i| {
-                        if (i > 0) try e.w(", ");
-                        try e.emitItem(arg);
-                    }
-                }
-                try e.w(")");
-            },
+            .app => |app| try e.emitCall(app.func, app.args),
             .binop => |b| {
                 const info = Parser.opInfo(b.op).?;
                 if (std.mem.eql(u8, b.op, "++")) {
@@ -1730,14 +2055,19 @@ const Emitter = struct {
                 try e.emitAtomic(inner);
                 try e.w("?");
             },
-            .lambda => |l| {
+            .lambda => {
+                // `fn a -> fn b -> body` is one function of two arguments.
+                const flat = try e.flatLambda(x);
+                const scope_mark = e.scope.items.len;
+                defer e.scope.items.len = scope_mark;
                 try e.w("|");
-                for (l.params, 0..) |prm, i| {
+                for (flat.params, 0..) |prm, i| {
                     if (i > 0) try e.w(", ");
                     try e.emitPattern(prm);
+                    try e.bindPattern(prm);
                 }
                 try e.w("| ");
-                try e.emitBody(l.body);
+                try e.emitBody(flat.body);
             },
             .if_ => |f| {
                 try e.w("if ");
@@ -1762,10 +2092,13 @@ const Emitter = struct {
                 try e.w(" {");
                 e.indent += 1;
                 for (c.arms) |arm| {
+                    const scope_mark = e.scope.items.len;
+                    defer e.scope.items.len = scope_mark;
                     try e.nl();
                     for (arm.pats, 0..) |pat, i| {
                         if (i > 0) try e.w(" | ");
                         try e.emitPattern(pat);
+                        try e.bindPattern(pat);
                     }
                     if (arm.guard) |g| {
                         try e.w(" if ");
@@ -1924,7 +2257,7 @@ const Emitter = struct {
         switch (t.*) {
             .name => |n| try e.w(if (std.ascii.isLower(n[0])) try snake(e.a, n) else n),
             .app => |app| {
-                try e.w(app.head);
+                try e.w(if (std.mem.eql(u8, app.head, "Result")) "Try" else app.head);
                 try e.w("(");
                 for (app.args, 0..) |arg, i| {
                     if (i > 0) try e.w(", ");
@@ -1932,16 +2265,27 @@ const Emitter = struct {
                 }
                 try e.w(")");
             },
-            .func => |f| {
+            .func => {
+                // Curried: `A -> B -> C` (and `A -> (B -> C)`) is Roc's `A, B -> C`.
                 if (in_args) try e.w("(");
-                if (f.args.len == 1 and f.args[0].* == .unit) {
-                    try e.w("()");
-                } else for (f.args, 0..) |arg, i| {
-                    if (i > 0) try e.w(", ");
-                    try e.emitType(arg, true);
+                var cur = t;
+                var first = true;
+                var effectful = false;
+                while (true) {
+                    while (cur.* == .paren and cur.paren.* == .func) cur = cur.paren;
+                    if (cur.* != .func) break;
+                    const f = cur.func;
+                    if (!(f.args.len == 1 and f.args[0].* == .unit)) for (f.args) |arg| {
+                        if (!first) try e.w(", ");
+                        first = false;
+                        try e.emitType(arg, true);
+                    };
+                    effectful = f.effectful;
+                    cur = f.ret;
                 }
-                try e.w(if (f.effectful) " => " else " -> ");
-                try e.emitType(f.ret, false);
+                if (first) try e.w("()");
+                try e.w(if (effectful) " => " else " -> ");
+                try e.emitType(cur, false);
                 if (in_args) try e.w(")");
             },
             .record => |r| {

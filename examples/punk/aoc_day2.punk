@@ -32,29 +32,29 @@ part2! = fn input ->
 
 solve = fn input, findInvalid ->
     var allInvalid = []
-    for rangeStr in Str.splitOn (Str.trim input) ","
+    for rangeStr in Str.splitOn "," (Str.trim input)
         range = parseRange rangeStr?
         var rangeInvalid = []
 
         -- Split by digit count and process each sub-range
         for subRange in splitByDigitCount range
-            rangeInvalid = List.concat rangeInvalid (findInvalid subRange)
+            rangeInvalid = rangeInvalid ++ findInvalid subRange
 
-        allInvalid = List.concat allInvalid (dedup rangeInvalid)
+        allInvalid = allInvalid ++ dedup rangeInvalid
 
-    Ok (List.fold allInvalid 0 (fn acc, n -> acc + n))
+    Ok (List.fold (fn acc, n -> acc + n) 0 allInvalid)
 
 -- Ideally we use a Set, but it's not available yet.
 dedup = fn list ->
     var deduped = []
     for item in list
-        if not (List.contains deduped item) then
-            deduped = List.append deduped item
+        if not (List.contains item deduped) then
+            deduped = List.append item deduped
     deduped
 
 parseRange : Str -> Try (U64, U64) _
 parseRange = fn rangeStr ->
-    case Str.splitOn rangeStr "-" of
+    case Str.splitOn "-" rangeStr of
         [a, b] -> Ok (U64.fromStr a?, U64.fromStr b?)
         _ -> Err InvalidRangeFormat
 
@@ -69,7 +69,7 @@ splitByDigitCount = fn (start, end) ->
     else
         -- Find the boundary: the largest number with startDigits digits
         boundary = pow 10 startDigits - 1
-        List.append (splitByDigitCount (boundary + 1, end)) (start, boundary)
+        List.append (start, boundary) (splitByDigitCount (boundary + 1, end))
 
 countDigits : U64 -> U64
 countDigits = fn n ->
@@ -111,7 +111,7 @@ findInvalidInRangePart2 = fn (start, end) ->
 collect = fn divisors, digitCount, start, end ->
     var allInvalid = []
     for divisor in divisors
-        allInvalid = List.concat allInvalid (generateRepeating divisor digitCount start end)
+        allInvalid = allInvalid ++ generateRepeating divisor digitCount start end
     allInvalid
 
 getDivisors : U64 -> List U64
@@ -120,7 +120,7 @@ getDivisors = fn n ->
     var d = 1
     while d <= n // 2
         if n % d == 0 then
-            divisors = List.append divisors d
+            divisors = List.append d divisors
         d = d + 1
     divisors
 
@@ -135,6 +135,6 @@ generateRepeating = fn patternLen, digitCount, rangeStart, rangeEnd ->
     while pattern <= patternMax
         repeated = pattern * multiplier
         if rangeStart <= repeated && repeated <= rangeEnd then
-            results = List.append results repeated
+            results = List.append repeated results
         pattern = pattern + 1
     results

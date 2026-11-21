@@ -48,7 +48,7 @@ test "functions, application, lambdas" {
         \\    a + b
         \\
         \\total = add 1 (add 2 3)
-        \\names = List.map users (fn u -> u.firstName)
+        \\names = List.map (fn u -> u.firstName) users
         \\now! = fn () -> Time.now! ()
     ,
         \\add : I64, I64 -> I64
@@ -75,7 +75,7 @@ test "block bodies" {
     );
 }
 
-test "pipes are data-first in step 2" {
+test "pipes pass the value last" {
     try check(
         \\result =
         \\    input
@@ -88,12 +88,18 @@ test "pipes are data-first in step 2" {
         \\    |> List.keepIf isGood
         \\
         \\ranges = text |> List.mapTry parseRange?
+        \\
+        \\line = name |> greet "Hello"
+        \\back = greet "Hi" <| name
     ,
         \\result = summarize(List.map(parse(input), normalize))
         \\
         \\other = List.keep_if(input, is_good)
         \\
         \\ranges = List.map_try(text, parse_range)?
+        \\
+        \\line = greet("Hello", name)
+        \\back = greet("Hi", name)
         \\
     );
 }
@@ -311,7 +317,7 @@ test "operators" {
 
 test "lambda body block inside an argument" {
     try check(
-        \\out = List.map xs (fn x ->
+        \\out = xs |> List.map (fn x ->
         \\        y = x * 2
         \\        y + 1)
     ,
@@ -375,6 +381,135 @@ test "module whose type has the module's name" {
         \\        Rect(w, h) => w * h
         \\    }
         \\}
+        \\
+    );
+}
+
+test "builtins take the value they work on last" {
+    try check(
+        \\a = List.map double xs
+        \\b = Str.splitOn "," text
+        \\c = Str.joinWith ", " names
+        \\d = List.fold (fn acc, x -> acc + x) 0 xs
+        \\e = List.map2 (fn x, y -> x + y) xs ys
+        \\f = Result.withDefault 0 (U64.fromStr s)
+        \\g = Result.map double r
+        \\h = Dict.insert key value dict
+        \\i = U64.pow 10 digits
+    ,
+        \\a = List.map(xs, double)
+        \\b = Str.split_on(text, ",")
+        \\c = Str.join_with(names, ", ")
+        \\d = List.fold(xs, 0, |acc, x| acc + x)
+        \\e = List.map2(xs, ys, |x, y| x + y)
+        \\f = Try.ok_or(U64.from_str(s), 0)
+        \\g = Try.map_ok(r, double)
+        \\h = Dict.insert(dict, key, value)
+        \\i = U64.pow(10, digits)
+        \\
+    );
+}
+
+test "currying: partial application of known functions" {
+    try check(
+        \\add : I64 -> I64 -> I64
+        \\add = fn a, b ->
+        \\    a + b
+        \\
+        \\inc = add 1
+        \\incAll = List.map (add 1)
+        \\three = inc 2
+        \\six = List.map (add 1) [1, 2] |> List.sum
+        \\mapper = List.map
+        \\later = add (expensive 5)
+    ,
+        \\add : I64, I64 -> I64
+        \\add = |a, b| a + b
+        \\
+        \\inc = |punk_a1| add(1, punk_a1)
+        \\inc_all = |punk_a2| List.map(punk_a2, |punk_a3| add(1, punk_a3))
+        \\three = inc(2)
+        \\six = List.sum(List.map([1, 2], |punk_a4| add(1, punk_a4)))
+        \\mapper = |punk_a5, punk_a6| List.map(punk_a6, punk_a5)
+        \\later = {
+        \\    punk_v7 = expensive(5)
+        \\    |punk_a8| add(punk_v7, punk_a8)
+        \\}
+        \\
+    );
+}
+
+test "currying: nested lambdas, extra arguments, shadowing" {
+    try check(
+        \\add = fn a -> fn b -> a + b
+        \\
+        \\pick = fn flag ->
+        \\    if flag then add else fn a, b -> a - b
+        \\
+        \\x = pick True 1 2
+        \\
+        \\apply = fn add, y ->
+        \\    add y
+        \\
+        \\local = fn n ->
+        \\    times = fn a, b -> a * b
+        \\    double = times 2
+        \\    double n
+    ,
+        \\add = |a, b| a + b
+        \\
+        \\pick = |flag| if flag {
+        \\    add
+        \\} else {
+        \\    |a, b| a - b
+        \\}
+        \\
+        \\x = pick(True)(1, 2)
+        \\
+        \\apply = |add, y| add(y)
+        \\
+        \\local = |n| {
+        \\    times = |a, b| a * b
+        \\    double = |punk_a1| times(2, punk_a1)
+        \\    double(n)
+        \\}
+        \\
+    );
+}
+
+test "curried function types" {
+    try check(
+        \\f : I64 -> I64 -> I64
+        \\g : (a -> b -> c) -> List a -> List b -> List c
+        \\h : Str -> (Str -> Str)
+        \\r : Result I64 Str
+        \\run! : () => Result {} Str
+    ,
+        \\f : I64, I64 -> I64
+        \\g : (a, b -> c), List(a), List(b) -> List(c)
+        \\h : Str, Str -> Str
+        \\r : Try(I64, Str)
+        \\run! : () => Try({}, Str)
+        \\
+    );
+}
+
+test "currying: a definition gets the arity of its annotation" {
+    try check(
+        \\pick : Bool -> I64 -> I64 -> I64
+        \\pick = fn useAdd ->
+        \\    if useAdd then add else mul
+        \\
+        \\x = pick True 3 4
+    ,
+        \\pick : Bool, I64, I64 -> I64
+        \\pick = |use_add, punk_a1, punk_a2| (if use_add {
+        \\    add
+        \\} else {
+        \\    mul
+        \\})(punk_a1, punk_a2)
+        \\
+        \\x = pick(True, 3, 4)
         \\
     );
 }
