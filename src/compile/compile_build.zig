@@ -39,7 +39,6 @@ pub const RuntimeLoweringConfig = struct {
 const Report = reporting.Report;
 const BuiltinModules = eval.BuiltinModules;
 const compile_package = @import("compile_package.zig");
-const punk_report = @import("punk_report.zig");
 const Mode = compile_package.Mode;
 const Allocator = std.mem.Allocator;
 
@@ -140,28 +139,6 @@ fn freeSlice(gpa: Allocator, s: []u8) void {
 
 fn freeConstSlice(gpa: Allocator, s: []const u8) void {
     gpa.free(@constCast(s));
-}
-
-/// punkroc: the report for a syntax error in the `.punk` file `path`, when
-/// that is why reading it failed. The translator finds these, not the Roc
-/// parser; the report shows the line of the `.punk` file.
-pub fn punkSyntaxReport(gpa: Allocator, path: []const u8) Allocator.Error!?Report {
-    const full = (try CoreCtx.punkSyntaxError(gpa, path)) orelse return null;
-    defer gpa.free(full);
-    // `full` is `path:line:col: message`.
-    const rest = if (std.mem.startsWith(u8, full, path)) full[path.len..] else full;
-    const split = std.mem.find(u8, rest, ": ") orelse rest.len;
-    const message = if (split + 2 <= rest.len) rest[split + 2 ..] else "";
-    var position = std.mem.splitScalar(u8, rest[0..split], ':');
-    _ = position.next();
-    const line = position.next() orelse "?";
-    const col = position.next() orelse "?";
-    // The source region below shows where.
-    var report = try Report.initWithPath(gpa, "Syntax Error", "There is a syntax error in ", path, ".", .fatal);
-    errdefer report.deinit();
-    try report.document.addReflowingText(message);
-    try punk_report.addSyntaxErrorSource(&report, path, line, col);
-    return report;
 }
 
 /// The roc cache directory for downloaded packages:
@@ -1620,7 +1597,6 @@ pub const BuildEnv = struct {
                 error.OutOfMemory,
                 error.StreamTooLong,
                 => {
-                    if (try punkSyntaxReport(self.gpa, file_abs)) |report| break :blk report;
                     var other_report = try Report.initWithPath(self.gpa, "Could Not Read File", "I could not read the file ", file_abs, ".", .fatal);
                     try other_report.document.addText("I did get the following error: ");
                     try other_report.addErrorMessage(@errorName(err));
@@ -1794,11 +1770,7 @@ pub const BuildEnv = struct {
     /// source is digested here, once.
     fn readSourceFile(self: *BuildEnv, path: []const u8) (Allocator.Error || error{ FileNotFound, AccessDenied, StreamTooLong, IoError })!SourceRead {
         const allocator = Coordinator.workerAllocatorFor(self.gpa, self.mode);
-        // punkroc: the translator of a `.punk` app reads the modules it
-        // imports from URL packages, so it can find them here.
-        var fs = self.filesystem;
-        fs.punk_packages = .{ .ctx = self, .dir = punkPackageDir };
-        const data = fs.readFile(path, allocator) catch |err| switch (err) {
+        const data = self.filesystem.readFile(path, allocator) catch |err| switch (err) {
             error.FileNotFound => return error.FileNotFound,
             error.AccessDenied => return error.AccessDenied,
             error.StreamTooLong => return error.StreamTooLong,
@@ -1816,30 +1788,6 @@ pub const BuildEnv = struct {
             .digest = digested.digest,
             .file_state = if (digested.file_digest) |file_digest| watch_inputs.fileState(file_digest) else null,
         };
-    }
-
-    /// punkroc: the directory of the package at `url`, for the translator of
-    /// a `.punk` app. The package is downloaded into the package cache when it
-    /// is not there yet, as package resolution would do right after; the
-    /// download is the same, so resolution then finds it cached. Any problem
-    /// gives null: resolution reports it properly.
-    fn punkPackageDir(ctx: ?*anyopaque, allocator: Allocator, url: []const u8) ?[]const u8 {
-        const self: *BuildEnv = @ptrCast(@alignCast(ctx.?));
-        // A replaced dependency need not be downloaded at all.
-        if (self.resolution_config.replace_deps.len > 0) return null;
-        const parsed = base.url.parseUrlPath(url) catch return null;
-        self.ensurePackageCacheDir() catch return null;
-        var ctx_fetcher = self.resolutionFetcher();
-        const fetcher = ctx_fetcher.fetcher();
-        var reports = package_resolution.HeaderReports.init(allocator);
-        defer {
-            for (reports.items) |*report| report.deinit();
-            reports.deinit();
-        }
-        // The largest limit resolution applies; it checks the real one.
-        const limit = self.resolution_config.max_platform_transitive_expanded_bytes;
-        const fetched = fetcher.fetchUrlFn(fetcher.ctx, allocator, url, parsed.hash, limit, &reports) catch return null;
-        return fetched.root_dir;
     }
 
     fn currentFileWatchState(self: *BuildEnv, path: []const u8) Allocator.Error!watch_inputs.State {
@@ -2419,13 +2367,7 @@ pub const BuildEnv = struct {
 
     fn moduleToPath(self: *BuildEnv, pkg_name: []const u8, module_name: []const u8) (Allocator.Error || error{ InvalidPackageName, PathOutsideWorkspace })![]const u8 {
         if (self.packages.get(pkg_name)) |pkg| {
-            const roc_path = try self.logicalModuleToPath(pkg.root_dir, module_name);
-            // punkroc: `import Foo` also finds `Foo.punk`.
-            if (try self.filesystem.preferPunkSibling(self.gpa, roc_path)) |punk_path| {
-                self.gpa.free(roc_path);
-                return punk_path;
-            }
-            return roc_path;
+            return try self.logicalModuleToPath(pkg.root_dir, module_name);
         }
         return error.InvalidPackageName;
     }
@@ -4323,6 +4265,8 @@ pub const OrderedSink = struct {
     // draining will not be seen by subsequent drain operations. This ensures deterministic
     // ordering but means modules must complete all reporting before being marked as ready.
     drain_cursor: usize = 0,
+    /// punkroc: rewrites each report before it is recorded (src/punk/roc/report.zig).
+    rewrite: ?*const fn (*Report) Allocator.Error!void = null,
 
     // Lifecycle
     pub fn init(gpa: Allocator) OrderedSink {
@@ -4459,12 +4403,9 @@ pub const OrderedSink = struct {
             // Note: do not append to order here; buildOrder will populate and sort later
         }
 
-        // punkroc: a report about a `.punk` file points at that file, not
-        // at its Roc translation.
-        var owned = report;
-        try punk_report.remapReport(&owned);
-
         // Record report; take ownership by appending to per-module list
+        var owned = report;
+        if (self.rewrite) |rewrite| try rewrite(&owned); // punkroc
         try self.entries.items[entry_index].reports.append(owned);
         self.entries.items[entry_index].ready = true;
 

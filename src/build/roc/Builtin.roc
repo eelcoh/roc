@@ -5925,18 +5925,6 @@ Builtin :: [].{
 			Ok(a) => Ok(transform!(a))
 		}
 
-		## If the result is `Ok`, runs a function that may fail on the value it
-		## holds, and returns that function's result. If the result is `Err`, it is
-		## returned unchanged. (punkroc: Elm's `Result.andThen`.)
-		## ```roc
-		## expect Try.Ok(3.I64).and_then(|n| if n > 0 Ok(n) else Err(Negative)) == Ok(3)
-		## ```
-		and_then : Try(a, err), (a -> Try(b, err)) -> Try(b, err)
-		and_then = |try, next| match try {
-			Err(err) => Err(err)
-			Ok(a) => next(a)
-		}
-
 		## If the result is `Err`, transforms the value it holds by running a conversion
 		## function on it. Then returns a new `Err` holding the transformed value. If
 		## the result is `Ok`, this has no effect. Use [Try.map_ok] to transform an `Ok`.

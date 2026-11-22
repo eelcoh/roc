@@ -5,20 +5,76 @@
 const std = @import("std");
 const punk = @import("punk");
 const reporting = @import("reporting");
+const vfs = @import("vfs.zig");
 
 const Allocator = std.mem.Allocator;
 const Report = reporting.Report;
 const Document = reporting.Document;
 const DocumentElement = reporting.DocumentElement;
 
+/// The build's hook for every report it emits (`OrderedSink.rewrite`).
+/// A failure to read a `.punk` file that did not translate becomes the
+/// report of its syntax error; any other report about a `.punk` file points
+/// at that file instead of its Roc translation.
+pub fn rewrite(report: *Report) Allocator.Error!void {
+    if (try syntaxReportFor(report)) |replacement| {
+        report.deinit();
+        report.* = replacement;
+        return;
+    }
+    try remapReport(report);
+}
+
 /// Rewrites every source region and location in `report` that is in a
 /// translated `.punk` file to point at the `.punk` source instead.
 pub fn remapReport(report: *Report) Allocator.Error!void {
+    if (report.file) |f| if (vfs.virtualPunk(f)) |p| {
+        report.file = try report.addOwnedString(p);
+    };
     const about_punk = mentionsPunk(&report.headline) or mentionsPunk(&report.document) or
         (if (report.file) |f| isPunk(f) != null else false);
     if (!about_punk) return;
     try remapDocument(&report.headline);
     try remapDocument(&report.document);
+}
+
+/// When `report` is the build failing to read a `.punk` file (or a virtual
+/// `.roc` path for one) because it has a syntax error, the report of that
+/// syntax error.
+fn syntaxReportFor(report: *const Report) Allocator.Error!?Report {
+    const read_failure = std.mem.eql(u8, report.title, "Could Not Read File") or
+        std.mem.eql(u8, report.title, "Parsing Failed");
+    if (!read_failure) return null;
+    for (report.headline.elements.items) |el| switch (el) {
+        .annotated => |a| if (a.annotation == .path) {
+            const path = vfs.virtualPunk(a.content) orelse a.content;
+            if (!punk.isPunkPath(path)) continue;
+            return try syntaxReport(report.allocator, path);
+        },
+        else => {},
+    };
+    return null;
+}
+
+/// The report for a syntax error in the `.punk` file `path`, when that is
+/// why reading it failed. The translator finds these, not the Roc parser;
+/// the report shows the line of the `.punk` file.
+pub fn syntaxReport(gpa: Allocator, path: []const u8) Allocator.Error!?Report {
+    const full = (try punk.syntaxError(gpa, path)) orelse return null;
+    defer gpa.free(full);
+    // `full` is `path:line:col: message`.
+    const rest = if (std.mem.startsWith(u8, full, path)) full[path.len..] else full;
+    const split = std.mem.find(u8, rest, ": ") orelse rest.len;
+    const message = if (split + 2 <= rest.len) rest[split + 2 ..] else "";
+    var position = std.mem.splitScalar(u8, rest[0..split], ':');
+    _ = position.next();
+    const line = position.next() orelse "?";
+    const col = position.next() orelse "?";
+    var report = try Report.initWithPath(gpa, "Syntax Error", "There is a syntax error in ", path, ".", .fatal);
+    errdefer report.deinit();
+    try report.document.addReflowingText(message);
+    try addSyntaxErrorSource(&report, path, line, col);
+    return report;
 }
 
 fn mentionsPunk(doc: *const Document) bool {
@@ -44,7 +100,8 @@ fn remapDocument(doc: *Document) Allocator.Error!void {
 }
 
 fn isPunk(filename: ?[]const u8) ?[]const u8 {
-    const f = filename orelse return null;
+    const name = filename orelse return null;
+    const f = vfs.virtualPunk(name) orelse name;
     if (!punk.isPunkPath(f) or !punk.hasSourceMap(f)) return null;
     return f;
 }
@@ -62,7 +119,7 @@ fn remapElement(doc: *Document, el: *DocumentElement) Allocator.Error!void {
                 .end_line = m.end.line,
                 .end_column = m.end.column,
                 .region_annotation = r.region_annotation,
-                .filename = r.filename,
+                .filename = path,
             };
         },
         .source_code_with_underlines => |*sw| {
@@ -88,7 +145,7 @@ fn remapElement(doc: *Document, el: *DocumentElement) Allocator.Error!void {
                 .end_line = last,
                 .end_column = 1,
                 .region_annotation = d.region_annotation,
-                .filename = d.filename,
+                .filename = path,
             };
         },
         .source_code_multi_region => |*mr| {
@@ -101,12 +158,14 @@ fn remapElement(doc: *Document, el: *DocumentElement) Allocator.Error!void {
             }
             // The renderer slices the regions' lines out of `source`.
             mr.source = (try linesOf(doc, path, 1, std.math.maxInt(u32))) orelse return;
+            mr.filename = path;
         },
         .source_location => |*loc| {
             const path = isPunk(loc.filename) orelse return;
             const m = (try remapOwned(doc, path, loc.line, loc.column, loc.line, loc.column)) orelse return;
             loc.line = m.start.line;
             loc.column = m.start.column;
+            loc.filename = path;
         },
         // Names in the message as the programmer wrote them.
         .text => |t| if (try camel(doc, t)) |c| {
@@ -118,7 +177,9 @@ fn remapElement(doc: *Document, el: *DocumentElement) Allocator.Error!void {
         .raw => |t| if (try camel(doc, t)) |c| {
             el.* = .{ .raw = c };
         },
-        .annotated => |a| if (try camel(doc, a.content)) |c| {
+        .annotated => |a| if (a.annotation == .path) {
+            if (vfs.virtualPunk(a.content)) |p| el.* = .{ .annotated = .{ .content = p, .annotation = a.annotation } };
+        } else if (try camel(doc, a.content)) |c| {
             el.* = .{ .annotated = .{ .content = c, .annotation = a.annotation } };
         },
         else => {},
