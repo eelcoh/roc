@@ -1,8 +1,0 @@
-[
-  { "id": "books/dune.epub", "title": "Dune", "author": "Frank Herbert", "series": "Dune 1", "on": ["local", "kobo"] },
-  { "id": "books/children-of-time.epub", "title": "Children of Time", "author": "Adrian Tchaikovsky", "series": "Children of Time 1", "on": ["local"] },
-  { "id": "books/the-left-hand-of-darkness.epub", "title": "The Left Hand of Darkness", "author": "Ursula K. Le Guin", "series": "Hainish Cycle", "on": ["local", "crosspoint"] },
-  { "id": "books/a-wizard-of-earthsea.epub", "title": "A Wizard of Earthsea", "author": "Ursula K. Le Guin", "series": "Earthsea 1", "on": ["kobo"] },
-  { "id": "books/piranesi.epub", "title": "Piranesi", "author": "Susanna Clarke", "on": ["local", "kobo", "crosspoint"] },
-  { "id": "books/slow-horses.epub", "title": "Slow Horses", "author": "Mick Herron", "series": "Slough House 1", "on": ["local"] }
-]

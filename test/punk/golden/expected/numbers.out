@@ -1,6 +1,0 @@
-7 // 2 = 3, -7 // 2 = -3, 7 // 0 = 0
-7 % 3 = 1, 7 % 0 = 0
-modBy 3 -1 = 2, modBy -3 5 = -1, modBy 0 7 = 0
-remainderBy 3 -1 = -1, remainderBy 0 7 = 0
-U64: 0
-exit 0

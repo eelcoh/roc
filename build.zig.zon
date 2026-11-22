@@ -127,5 +127,8 @@
         "vendor",
         "LICENSE",
         "legal_details",
+        // punkroc: the Windows runtime libraries roc embeds, for eelcoh/punk,
+        // which gets this compiler as a dependency (with only these paths).
+        "test/fx/platform/targets",
     },
 }

@@ -2523,6 +2523,11 @@ pub fn build(b: *std.Build) void {
     });
 
     const roc_modules = modules.RocModules.create(b, build_options, zstd);
+    // punkroc: eelcoh/punk passes its `src/` here, so `roc` reads `.punk` files.
+    if (b.option(std.Build.LazyPath, "punk", "punk's src/ directory (eelcoh/punk); builds roc with punk's seam")) |punk_src| {
+        roc_modules.punk_roc.root_source_file = punk_src.path(b, "punk/roc/mod.zig");
+        roc_modules.punk_roc.addImport("punk", b.createModule(.{ .root_source_file = punk_src.path(b, "punk/mod.zig") }));
+    }
     const compiler_version_module = compiler_version_options.createModule();
     roc_modules.base.addImport("compiler_version", compiler_version_module);
     roc_modules.lsp.addImport("compiler_version", compiler_version_module);
@@ -2935,15 +2940,6 @@ pub fn build(b: *std.Build) void {
     fixture_options.addOption([]const u8, "build_root", b.root.joinString(b.allocator, "") catch @panic("OOM"));
     roc_modules.addAll(roc_exe);
     const roc_install_step = install_and_run(b, no_bin, roc_exe, strip_macho_exports_tool, build_roc_step, run_roc_step, run_args);
-    // punkroc: `zig-out/bin/punk` is `roc` under another name, so `punk fmt`
-    // and `punk check --json` read as the roadmap writes them.
-    if (roc_install_step) |install_step| if (builtin.os.tag != .windows) {
-        const punk_link = b.addSystemCommand(&.{ "ln", "-sf", "roc" });
-        punk_link.addDirectoryArg(.{ .relative = .{ .base = .install_prefix, .sub_path = "bin/punk" } });
-        punk_link.has_side_effects = true;
-        punk_link.step.dependOn(install_step);
-        build_roc_step.dependOn(&punk_link.step);
-    };
 
     const run_builtin_format = b.addRunArtifact(roc_exe);
     run_builtin_format.addArgs(&.{ "fmt", "--check", "src/build/roc/Builtin.roc" });
@@ -7252,7 +7248,7 @@ fn add_tracy(
 
         base.root_module.addIncludePath(.{ .cwd_relative = tracy_path });
         base.root_module.addCSourceFile(.{ .file = .{ .cwd_relative = client_cpp }, .flags = tracy_c_flags });
-        base.root_module.addCSourceFile(.{ .file = .{ .cwd_relative = "src/build/tracy-shutdown.cpp" }, .flags = tracy_c_flags });
+        base.root_module.addCSourceFile(.{ .file = base.root_module.owner.path("src/build/tracy-shutdown.cpp"), .flags = tracy_c_flags }); // punkroc: also as a dependency
         if (!links_llvm) {
             base.root_module.linkSystemLibrary("c++", .{ .use_pkg_config = .no });
         }
@@ -7403,7 +7399,7 @@ fn addStaticBinaryenOptionsToModule(mod: *std.Build.Module) void {
         .search_strategy = .mode_first,
     };
     mod.addCSourceFile(.{
-        .file = .{ .cwd_relative = "src/build/zig_binaryen.cpp" },
+        .file = mod.owner.path("src/build/zig_binaryen.cpp"), // punkroc: also as a dependency
         .flags = &exe_cflags,
     });
     mod.linkSystemLibrary("binaryen", link_static);

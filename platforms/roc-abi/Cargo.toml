@@ -1,9 +1,0 @@
-[package]
-name = "punk-roc-abi"
-description = "Roc's values and memory as a compiled punk app lays them out: shared by the hosts of punkroc's platforms."
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[lib]
-path = "src/lib.rs"

@@ -249,7 +249,6 @@ pub const ModuleType = enum {
     check,
     tracy,
     builtins,
-    punk,
     punk_roc,
     ctx,
     build_options,
@@ -338,15 +337,12 @@ pub const ModuleType = enum {
                 .extra_imports = &.{ "vendor_parse_float", "vendor_ryu", "roc_str_view" },
                 .tests = .{ .unit = .{ .aggregators = &.{"builtins tests"} } },
             },
-            // punkroc: the translator (no Roc code), and its seam with the compiler.
-            .punk => .{
-                .root = "src/punk/mod.zig",
-                .tests = .{ .unit = .{} },
-            },
+            // punkroc: punk's seam with the compiler. A stand-in here; eelcoh/punk
+            // builds with `-Dpunk=<its src/>`, which puts the real one in its place.
             .punk_roc => .{
-                .root = "src/punk/roc/mod.zig",
-                .deps = &.{ .punk, .ctx, .compile, .base, .reporting },
-                .tests = .{ .no_tests = "the seam is tested by test/punk/golden.sh" },
+                .root = "src/punk_stub.zig",
+                .deps = &.{ .ctx, .compile, .base, .reporting },
+                .tests = .{ .no_tests = "a stand-in; eelcoh/punk tests the real seam" },
             },
             .ctx => .{
                 .root = "src/ctx/mod.zig",
@@ -609,7 +605,6 @@ pub const RocModules = struct {
     can: *Module,
     check: *Module,
     tracy: *Module,
-    punk: *Module,
     punk_roc: *Module,
     ctx: *Module,
     build_options: *Module,
