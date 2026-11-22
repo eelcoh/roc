@@ -260,7 +260,8 @@ Everything a module exposes needs a type annotation (rule P201).
 | `List.filterMap` with `Maybe` | `List.filterMap` keeps the `Ok`s of a function that returns a `Result` |
 | `case` on `x :: xs` | list patterns `[x, ..xs]`; `::` does not exist |
 | `(+)`, `(::)` | write a lambda: `fn a, b -> a + b` |
-| `Html`, `Browser`, `Cmd` | not yet; programs are command-line apps on a platform |
+| `Html`, `Browser` | not yet; programs are command-line apps, servers or terminal apps on a platform |
+| `Cmd`, `Browser.element` | the tui platform: `init`, `update`, `view` and `Cmd` (see "The tui platform") |
 | `port`, `Task` | effects are `!` functions |
 | `type alias Model = {...}` | same |
 | `/=` | same (`!=` works too; write `/=`) |
@@ -359,6 +360,10 @@ Random.u64! : () => U64              -- 64 random bits from the OS
 the path from `Arg.list!`, never write a file name into the program.
 
 Import what you use: `import pf.Stdout`, `import pf.File`, ...
+
+A package name may be capitalized, as modules are: `{ Platform: platform
+"...", Json: "..." }` with `import Platform.Stdout` and `import Json.Decode
+as D`. That is the style for new code; `pf` and `json` keep working.
 
 ### The server platform
 
@@ -604,6 +609,68 @@ json.Value`) is the JSON tree; `Value.parse : Str -> Result Value Str`.
 Do not compare a `Value` or a `D.Error` with `==` (the compiler hangs); compare
 the encoded text instead.
 
+### The tui platform
+
+`platforms/tui` is for terminal apps (on ambit's tui platform), in the Elm
+architecture. The app exposes its `Model` and `Msg` types and `main`:
+
+```
+app [Model, Msg, main] { Platform: platform "platforms/tui/main.roc" }
+
+import Platform.Tui exposing [Event]
+import Platform.Cmd
+import Platform.View
+import Platform.File
+
+main = { init = init, update = update, view = view }
+
+init : (Model, Cmd Msg)                            -- a value, not a function
+init = ({ books = [] }, File.read "library.json" Loaded)
+
+update : Event Msg -> Model -> (Model, Cmd Msg)
+update = fn event, model ->
+    case event of
+        Key (Char "q") -> (model, Cmd.quit)
+        Key Down -> ...
+        Msg (Loaded (Ok text)) -> ...
+        _ -> (model, Cmd.none)
+
+view : Model -> View
+```
+
+```
+Event msg = Key Tui.Key | Paste Str | Resize Int Int | Msg msg   -- Resize: columns, rows; always first
+Tui.Key = Char Str | Ctrl Str | Alt Str | Enter | Esc | Backspace | Delete | Tab | BackTab
+        | Up | Down | Left | Right | Home | End | PageUp | PageDown | Insert | F Int
+Cmd.none, Cmd.quit : Cmd msg
+Cmd.batch : List (Cmd msg) -> Cmd msg
+Cmd.after : Int -> msg -> Cmd msg                  -- milliseconds
+Cmd.map : (a -> b) -> Cmd a -> Cmd b
+File.read : Str -> (Result Str Str -> msg) -> Cmd msg            -- only in the app's folder
+File.list : Str -> (Result (List Str) Str -> msg) -> Cmd msg     -- "" is the folder; folders end in /
+Clock.now : (Int -> msg) -> Cmd msg                -- milliseconds since 1970
+View.text : Str -> View                            -- lines of plain text
+View.paragraph : List View.Line -> View            -- View.Line = List View.Span
+View.list : Int -> List View.Line -> View          -- the line at this index highlighted, kept in sight
+View.column, View.row : List View -> View          -- above / beside each other, sharing the room
+View.height, View.width : Int -> View -> View      -- this many rows (in a column) / columns (in a row)
+View.block : Str -> View -> View                   -- a frame with a title
+View.empty : View
+View.span : List View.Attr -> Str -> View.Span     -- View.span [View.bold, View.fg Yellow] "text"
+View.plain : Str -> View.Span
+View.bold, View.dim, View.italic, View.underline, View.reversed : View.Attr
+View.fg, View.bg : View.Color -> View.Attr         -- Black Red Green Yellow Blue Magenta Cyan Gray DarkGray
+                                                   -- LightRed ... LightCyan White
+```
+
+A tag with arguments is a function, as in Elm: `File.read path Loaded`.
+Effects are commands: the app has no `!` functions; the platform does the
+work off the screen's thread and answers with a `Msg`. Like a server, a
+terminal app is not run with `punk app.punk`: a small Rust crate links it
+and tests it on ambit's sim (see `platforms/tui/README.md` and
+`examples/punk/library/`). `compare` does not take `Str` (Roc's strings have
+no order): compare `Str.toUtf8` bytes.
+
 ## Standard library
 
 The functions an Elm or Roc programmer reaches for first. The value a
@@ -653,6 +720,13 @@ Written by an agent that had only this file, on the first try.
 ### The same shortener with its links in Postgres
 
 @@example shortener-postgres/Shortener.punk@@
+
+### A terminal app
+
+The smallest one; `examples/punk/library/Library.punk` is crossload's
+library view (sorting, marking, searching), with its tests on ambit's sim.
+
+@@example counter/Counter.punk@@
 
 ## Style
 

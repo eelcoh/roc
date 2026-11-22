@@ -7,7 +7,7 @@
 #     sh test/punk/golden.sh            check
 #     sh test/punk/golden.sh --update   write the expected output anew
 #
-# Server apps are only type-checked here (their crate's cargo test runs them).
+# Server and terminal apps are only type-checked here (their crate's cargo test runs them).
 # A schema.sql next to an app has to be up to date (`punk check --schema`).
 # It fails as well when a program in examples/punk/ has no case, so that a
 # new example cannot be forgotten, when a .punk file there is not laid out
@@ -76,10 +76,11 @@ while read -r line; do
     run_case "$@"
 done < "$work/cases"
 
-# A server app (on platforms/server) can't run here: it is an archive that
-# its Rust crate links and tests (cargo test in its server/ folder, which runs
-# ambit's spec). Here it only has to type-check.
-server_apps=$(cd examples/punk && grep -l '^app.*platforms/server/main.roc' $(find . -name '*.punk') | sed 's|^\./||' | sort)
+# A server app (on platforms/server) or a terminal app (platforms/tui) can't
+# run here: it is an archive that its Rust crate links and tests (cargo test
+# in its server/ or tui/ folder, on ambit's spec or sim). Here it only has to
+# type-check.
+server_apps=$(cd examples/punk && grep -lE '^app.*platforms/(server|tui)/main.roc' $(find . -name '*.punk') | sed 's|^\./||' | sort)
 for f in $server_apps; do
     if "$roc" check "examples/punk/$f" > "$work/check" 2>&1; then
         echo "ok   check $f"

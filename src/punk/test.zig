@@ -735,6 +735,16 @@ const files = Files{ .entries = &.{
         \\    write_both! : Str, Str => {}
         \\}
     },
+    .{
+        "app/../pf/Cmd.roc",
+        \\Cmd(msg) := [None, Quit].{
+        \\    none : () -> Cmd(msg)
+        \\    none = || None
+        \\
+        \\    after : msg, I64 -> Cmd(msg)
+        \\    after = |msg, ms| None
+        \\}
+    },
 } };
 
 fn checkWith(src: []const u8, expected: []const u8) (punk.Error || error{TestExpectedEqual})!void {
@@ -1839,4 +1849,70 @@ test "rules: sorting and joins (P402, P403)" {
     try checkRule(head ++ "q = links |> Db.join users (fn l -> l.owner == \"x\") |> Db.map .url |> Db.all\n", 31, 32, .not_in_database);
     try checkRule(head ++ "q = links |> Db.join users (fn l, u -> l.owner == u.name) |> Db.map (fn l, u -> l) |> Db.all\n", 31, 81, .not_in_database);
     try checkRule(head ++ "q = links |> Db.join users (fn l, u -> l.owner == u.age) |> Db.map (fn l, _ -> l.url) |> Db.all\n", 31, 53, .query_type);
+}
+
+test "packages: capitalized names in the app header and the imports" {
+    try checkWith(
+        \\app [main!] { Platform: platform "../pf/main.roc", Json: "../json/main.roc" }
+        \\
+        \\import Platform.Stdout
+        \\import Json.Decode as D
+        \\
+        \\main! = fn () ->
+        \\    Stdout.line! "hi"
+    ,
+        \\app [main!] { pf: platform "../pf/main.roc", json: "../json/main.roc" }
+        \\
+        \\import pf.Stdout
+        \\import json.Decode as D
+        \\
+        \\main! = || Stdout.line!("hi")
+        \\
+    );
+}
+
+test "modules: a constant of a Roc module that is a function without arguments" {
+    try checkWith(
+        \\app [main] { pf: platform "../pf/main.roc" }
+        \\
+        \\import pf.Cmd
+        \\
+        \\nothing = Cmd.none
+        \\later = Cmd.after 100 Tick
+        \\both = [Cmd.none, later]
+    ,
+        \\app [main] { pf: platform "../pf/main.roc" }
+        \\
+        \\import pf.Cmd
+        \\
+        \\nothing = Cmd.none()
+        \\later = Cmd.after(Tick, 100)
+        \\both = [Cmd.none(), later]
+        \\
+    );
+}
+
+test "a tag with arguments, used as a value, is a function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    const out = try punk.translate(arena.allocator(),
+        \\type Msg
+        \\    = Loaded (Result Str Str)
+        \\    | Moved Int Int
+        \\    | Tick
+        \\
+        \\reading = File.read "x" Loaded
+        \\moves = List.map2 Moved xs ys
+        \\tick = Cmd.after 100 Tick
+        \\applied = Loaded (Ok "a")
+    , &diag);
+    const tail =
+        \\reading = File.read("x", |punk_t1| Loaded(punk_t1))
+        \\moves = List.map2(xs, ys, |punk_t1, punk_t2| Moved(punk_t1, punk_t2))
+        \\tick = Cmd.after(100, Tick)
+        \\applied = Loaded(Ok("a"))
+        \\
+    ;
+    try std.testing.expectEqualStrings(tail, out[out.len - tail.len ..]);
 }
