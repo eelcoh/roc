@@ -11,7 +11,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const punk = @import("punk");
 const private_dir_permissions: std.Io.Dir.Permissions = if (@hasDecl(std.Io.Dir.Permissions, "fromMode")) .fromMode(0o700) else .default_dir;
 const private_file_permissions: std.Io.Dir.Permissions = if (@hasDecl(std.Io.Dir.Permissions, "fromMode")) .fromMode(0o600) else .default_file;
 
@@ -28,11 +27,6 @@ gpa: Allocator,
 /// Arena allocator that lives for the duration of a compilation phase.
 /// Use for small and miscellaneous allocations that are never freed individually.
 arena: Allocator,
-
-/// punkroc: where packages given by URL are on disk, so the translator can
-/// read the modules a `.punk` app imports from them. The build sets this
-/// for the reads it makes; without it those modules are not read.
-punk_packages: ?punk.PackageFinder = null,
 
 /// A non-allocating question about one environment variable. Implementations
 /// answer while the environment value is valid; no borrowed pointer escapes.
@@ -200,42 +194,8 @@ fn defaultMapFilePrivate(_: ?*anyopaque, _: std.Io, _: []const u8) ?MappedFile {
 // --- Filesystem wrapper methods ---
 
 /// Read the entire contents of `path`. Caller owns returned slice.
-///
-/// A punkroc file (`.punk`) is translated to Roc source here, so every reader
-/// of source files sees Roc. A punkroc syntax error is reported as
-/// `error.IoError`; `punkSyntaxError` tells what it was.
 pub fn readFile(self: Self, path: []const u8, allocator: Allocator) ReadError![]u8 {
-    const data = try self.vtable.readFile(self.ctx, self.std_io, path, allocator);
-    if (!punk.isPunkPath(path)) return data;
-    defer allocator.free(data);
-    // The translator reads the modules a file imports for their interfaces.
-    var self_copy = self;
-    const reader: punk.Reader = .{ .ctx = &self_copy, .read = readRawForPunk, .packageDir = punkPackageDir };
-    return punk.toRocWith(allocator, path, data, reader) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.ParseError => error.IoError,
-    };
-}
-
-/// Reads a source file as it is on disk, for the punkroc translator.
-fn readRawForPunk(ctx: ?*anyopaque, allocator: Allocator, path: []const u8) ?[]u8 {
-    const self: *const Self = @ptrCast(@alignCast(ctx.?));
-    if (!self.fileExists(path)) return null;
-    return self.vtable.readFile(self.ctx, self.std_io, path, allocator) catch null;
-}
-
-/// The syntax error that stopped the last translation of the punkroc file
-/// `path` (see `readFile`), as `path:line:col: message`. Null when there was
-/// none. Caller owns the returned slice.
-pub fn punkSyntaxError(allocator: Allocator, path: []const u8) Allocator.Error!?[]u8 {
-    return punk.syntaxError(allocator, path);
-}
-
-/// The directory of a URL package, for the punkroc translator.
-fn punkPackageDir(ctx: ?*anyopaque, allocator: Allocator, url: []const u8) ?[]const u8 {
-    const self: *const Self = @ptrCast(@alignCast(ctx.?));
-    const finder = self.punk_packages orelse return null;
-    return finder.dir(finder.ctx, allocator, url);
+    return self.vtable.readFile(self.ctx, self.std_io, path, allocator);
 }
 
 /// Read `path` into `buffer`. Returns bytes read.
@@ -266,19 +226,6 @@ pub fn writeFileStream(self: Self, path: []const u8, stream: FileStream) WriteEr
     return self.vtable.writeFileStream(self.ctx, self.std_io, path, stream);
 }
 
-/// Given the `.roc` path a module name resolves to, return the path of the
-/// punkroc file next to it (`Foo.punk` for `Foo.roc`) when only that one
-/// exists, allocated with `allocator`. Otherwise return null.
-pub fn preferPunkSibling(self: Self, allocator: Allocator, roc_path: []const u8) Allocator.Error!?[]u8 {
-    if (!std.mem.endsWith(u8, roc_path, ".roc")) return null;
-    if (self.fileExists(roc_path)) return null;
-    const stem = roc_path[0 .. roc_path.len - ".roc".len];
-    const punk_path = try std.mem.concat(allocator, u8, &.{ stem, punk.extension });
-    if (self.fileExists(punk_path)) return punk_path;
-    allocator.free(punk_path);
-    return null;
-}
-
 /// Return `true` if a file (or directory) exists at `path`.
 pub fn fileExists(self: Self, path: []const u8) bool {
     return self.vtable.fileExists(self.ctx, self.std_io, path);
@@ -292,8 +239,6 @@ pub fn stat(self: Self, path: []const u8) StatError!FileInfo {
 /// Map the file at `path` as a private, copy-on-write mapping, or `null` when
 /// this context or target cannot map it. Release with `MappedFile.unmap`.
 pub fn mapFilePrivate(self: Self, path: []const u8) ?MappedFile {
-    // A punkroc file must go through `readFile`, which translates it.
-    if (punk.isPunkPath(path)) return null;
     return self.vtable.mapFilePrivate(self.ctx, self.std_io, path);
 }
 

@@ -89,6 +89,7 @@ HELPERS = {
     "Maybe.with_default": "a -> Maybe a -> a",
     "Maybe.map": "(a -> b) -> Maybe a -> Maybe b",
     "Maybe.and_then": "(a -> Maybe b) -> Maybe a -> Maybe b",
+    "Result.and_then": "(a -> Result b err) -> Result a err -> Result b err",
     "Result.to_maybe": "Result a e -> Maybe a",
     "Result.from_maybe": "e -> Maybe a -> Result a e",
     "String.length": "Str -> Int",

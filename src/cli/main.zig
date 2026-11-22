@@ -93,8 +93,7 @@ const reporting = @import("reporting");
 const parse = @import("parse");
 const tracy = @import("tracy");
 const ctx_mod = @import("ctx");
-const punk = @import("punk");
-const punk_json = @import("punk_json.zig");
+const punk_roc = @import("punk_roc"); // punkroc
 const compile = @import("compile");
 const can = @import("can");
 const check = @import("check");
@@ -327,6 +326,7 @@ fn initCliBuildEnv(ctx: *CliCtx, opts: CliBuildEnvOptions) InitCliBuildEnvError!
     if (!opts.no_cache) {
         try build_env.enableDefaultCacheManager(opts.verbose_cache);
     }
+    punk_roc.install(&build_env); // punkroc: the build reads `.punk` files
 
     return build_env;
 }
@@ -3223,36 +3223,28 @@ fn finishCompiledRun(
 /// On success, returns the staged app (caller owns it).
 /// Returns null if the file needs no default-platform wiring. Execution
 /// requests report invalid roots here, before any platform or host setup.
-/// Reads a source file as it is on disk, for the punkroc translator, which
-/// looks at the modules a `.punk` file imports.
-fn readRawForPunk(ctx_ptr: ?*anyopaque, allocator: Allocator, path: []const u8) ?[]u8 {
-    const ctx: *CliCtx = @ptrCast(@alignCast(ctx_ptr.?));
-    return std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, path, allocator, .limited(256 * 1024 * 1024)) catch null;
-}
-
 fn stageDefaultApp(
     ctx: *CliCtx,
     file_path: []const u8,
     purpose: default_app.Purpose,
 ) (Allocator.Error || error{CliError})!?default_app.Staged {
     const max_source_size = 256 * 1024 * 1024; // 256 MB
-    const raw_source = std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, file_path, ctx.gpa, .limited(max_source_size)) catch |err| switch (base.read_file_failure.kind(err)) {
+    var source = std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, file_path, ctx.gpa, .limited(max_source_size)) catch |err| switch (base.read_file_failure.kind(err)) {
         .out_of_memory => return error.OutOfMemory,
         // Any other read failure (e.g. file not found) means this isn't a
         // default app to handle here; fall through to the normal path.
         .file_not_found, .other => return null,
     };
+    // punkroc: a `.punk` file is translated first; on a syntax error the build reports it.
+    const translated = punk_roc.translateRaw(ctx.gpa, ctx.io.std_io, file_path, source) catch |err| {
+        ctx.gpa.free(source);
+        return if (err == error.OutOfMemory) error.OutOfMemory else null;
+    };
+    if (translated) |roc| {
+        ctx.gpa.free(source);
+        source = roc;
+    }
 
-    // punkroc: a `.punk` file is translated to Roc before it is looked at.
-    const source = if (punk.isPunkPath(file_path)) blk: {
-        defer ctx.gpa.free(raw_source);
-        const reader: punk.Reader = .{ .ctx = ctx, .read = readRawForPunk };
-        break :blk punk.toRocWith(ctx.gpa, file_path, raw_source, reader) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // The build reads the file again and reports the syntax error.
-            error.ParseError => return null,
-        };
-    } else raw_source;
     defer ctx.gpa.free(source);
 
     // Relative package paths in the header are written relative to the user's
@@ -18839,10 +18831,12 @@ fn rocFormat(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
     const stdout = ctx.io.stdout();
     const stderr = ctx.io.stderr();
     // punkroc: `.punk` files have their own formatter.
-    if (!args.stdin and args.paths.len > 0) {
-        var all_punk = true;
-        for (args.paths) |path| all_punk = all_punk and punk.isPunkPath(path);
-        if (all_punk) return rocFormatPunk(ctx, args);
+    if (!args.stdin and punk_roc.cli.allPunk(args.paths)) {
+        defer ctx.io.flush();
+        return punk_roc.cli.format(ctx.gpa, ctx.io.std_io, stdout, stderr, args.paths, args.check) catch |err| switch (err) {
+            error.Failed => error.FormattingFailed,
+            else => |e| e,
+        };
     }
     // Formatting a file brings its `roc` version pin up to date when this
     // compiler is a newer nightly than the one it names.
@@ -18914,55 +18908,6 @@ fn rocFormat(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
     if (had_errors) {
         return error.FormattingFailed;
     }
-}
-
-/// `roc fmt` (or `punk fmt`) on `.punk` files: lays each out in punkroc's
-/// canonical form (src/punk/format.zig). With `--check` it only lists the
-/// files that are not formatted.
-fn rocFormatPunk(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
-    const stdout = ctx.io.stdout();
-    const stderr = ctx.io.stderr();
-    var failed: usize = 0;
-    var unformatted: usize = 0;
-    var changed: usize = 0;
-    for (args.paths) |path| {
-        var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-        const src = std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, path, arena, .limited(256 * 1024 * 1024)) catch |err| {
-            try stderr.print("{s}: cannot read: {s}\n", .{ path, @errorName(err) });
-            failed += 1;
-            continue;
-        };
-        var diag: punk.Diagnostic = .{};
-        const out = punk.format.format(arena, src, &diag) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.ParseError, error.Unsafe => {
-                try stderr.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
-                failed += 1;
-                continue;
-            },
-        };
-        if (std.mem.eql(u8, out, src)) continue;
-        if (args.check) {
-            try stdout.print("{s}\n", .{path});
-            unformatted += 1;
-        } else {
-            std.Io.Dir.cwd().writeFile(ctx.io.std_io, .{ .sub_path = path, .data = out }) catch |err| {
-                try stderr.print("{s}: cannot write: {s}\n", .{ path, @errorName(err) });
-                failed += 1;
-                continue;
-            };
-            changed += 1;
-        }
-    }
-    if (args.check and unformatted > 0) {
-        try stdout.print("{d} file(s) are not formatted; run `punk fmt` on them.\n", .{unformatted});
-    } else if (!args.check) {
-        try stdout.print("Formatted {d} file(s), {d} changed.\n", .{ args.paths.len - failed, changed });
-    }
-    ctx.io.flush();
-    if (failed > 0 or unformatted > 0) return error.FormattingFailed;
 }
 
 /// Create a progress reporter for a CLI operation. The breakdown is drawn to
@@ -20981,9 +20926,8 @@ fn finishRocCheck(
     const elapsed = @as(u64, @intCast(std.Io.Timestamp.now(ctx.io.std_io, .awake).nanoseconds - timer_start_ns));
     const stderr_report_config = ctx.reportConfig(.stderr);
 
-    if (args.json) {
-        const display_path = try ctx.displayPath(args.path);
-        try punk_json.write(ctx.arena, stdout, display_path, check_result.reports, check_result.error_count, check_result.warning_count, ctx.reportConfig(.stdout));
+    if (args.json) { // punkroc: `punk check --json`
+        try punk_roc.json.write(ctx.arena, stdout, try ctx.displayPath(args.path), check_result.reports, check_result.error_count, check_result.warning_count, ctx.reportConfig(.stdout));
         ctx.io.flush();
         if (check_result.error_count > 0) return error.CheckFailed;
         return;
@@ -21147,53 +21091,6 @@ fn writeDefaultAppCheckWatchInputs(
     try writeWatchInputSetFile(ctx, file_path, &input_set);
 }
 
-/// `punk check --schema app.punk`: brings the `schema.sql` next to the app
-/// up to date with the tables it declares, adding a version when they
-/// changed (src/punk/migrate.zig), and says what the new version does.
-fn rocCheckSchema(ctx: *CliCtx, path: []const u8) RocCheckError!void {
-    const stdout = ctx.io.stdout();
-    const stderr = ctx.io.stderr();
-    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const cwd = std.Io.Dir.cwd();
-    const src = cwd.readFileAlloc(ctx.io.std_io, path, arena, .limited(256 * 1024 * 1024)) catch |err| {
-        try stderr.print("{s}: cannot read: {s}\n", .{ path, @errorName(err) });
-        ctx.io.flush();
-        return error.CheckFailed;
-    };
-    const schema_path = try std.fs.path.join(arena, &.{ std.fs.path.dirname(path) orelse ".", "schema.sql" });
-    const existing: ?[]const u8 = cwd.readFileAlloc(ctx.io.std_io, schema_path, arena, .limited(256 * 1024 * 1024)) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => {
-            try stderr.print("{s}: cannot read: {s}\n", .{ schema_path, @errorName(err) });
-            ctx.io.flush();
-            return error.CheckFailed;
-        },
-    };
-    var diag: punk.Diagnostic = .{};
-    const result = punk.schema(arena, src, existing, &diag) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.ParseError => {
-            try stderr.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
-            ctx.io.flush();
-            return error.CheckFailed;
-        },
-    };
-    if (!result.changed) {
-        try stdout.print("{s} is up to date\n", .{schema_path});
-        ctx.io.flush();
-        return;
-    }
-    cwd.writeFile(ctx.io.std_io, .{ .sub_path = schema_path, .data = result.sql }) catch |err| {
-        try stderr.print("{s}: cannot write: {s}\n", .{ schema_path, @errorName(err) });
-        ctx.io.flush();
-        return error.CheckFailed;
-    };
-    try stdout.print("{s}: {s}", .{ schema_path, result.report });
-    ctx.io.flush();
-}
-
 fn rocCheck(ctx: *CliCtx, args_in: cli_args.CheckArgs, arg0: []const u8) RocCheckError!void {
     const trace = tracy.trace(@src());
     defer trace.end();
@@ -21215,7 +21112,13 @@ fn rocCheck(ctx: *CliCtx, args_in: cli_args.CheckArgs, arg0: []const u8) RocChec
     const stdout = ctx.io.stdout();
     const stderr = ctx.io.stderr();
 
-    if (args.schema) return rocCheckSchema(ctx, args.path);
+    if (args.schema) { // punkroc: `punk check --schema`
+        defer ctx.io.flush();
+        return punk_roc.cli.checkSchema(ctx.gpa, ctx.io.std_io, stdout, stderr, args.path) catch |err| switch (err) {
+            error.Failed => error.CheckFailed,
+            else => |e| e,
+        };
+    }
 
     const timer_start_ns = std.Io.Timestamp.now(ctx.io.std_io, .awake).nanoseconds;
 

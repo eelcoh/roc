@@ -7083,13 +7083,6 @@ pub const Coordinator = struct {
             },
             .type_check => "Type Checking Failed",
         };
-        // punkroc: a `.punk` file that does not translate failed to read.
-        if (failure.cause == .read_source) {
-            if (try compile_build.punkSyntaxReport(self.gpa, mod.path)) |report| {
-                try appendReportOwned(self.gpa, &mod.reports, report);
-                return operation_error;
-            }
-        }
         const after = try std.fmt.allocPrint(self.gpa, ": {s}.", .{@errorName(operation_error)});
         defer self.gpa.free(after);
         const report = try Report.initWithPath(self.gpa, title, "", mod.path, after, .fatal);
@@ -7651,7 +7644,7 @@ pub const Coordinator = struct {
     }
 
     /// Resolve a module name to a path using a specific allocator
-    fn resolveModulePathWithAllocator(self: *Coordinator, root_dir: []const u8, mod_name: []const u8, alloc: Allocator) Allocator.Error![]const u8 {
+    fn resolveModulePathWithAllocator(_: *Coordinator, root_dir: []const u8, mod_name: []const u8, alloc: Allocator) Allocator.Error![]const u8 {
         // The relative path is a temporary of the join, so it starts on the stack.
         var rel_buffer: [256]u8 = undefined;
         var rel_state = std.heap.BufferFirstAllocator.init(&rel_buffer, alloc);
@@ -7667,13 +7660,7 @@ pub const Coordinator = struct {
         }
         try rel.appendSlice(rel_alloc, ".roc");
 
-        const roc_path = try std.fs.path.join(alloc, &.{ root_dir, rel.items });
-        // punkroc: `import Foo` also finds `Foo.punk`.
-        if (try self.roc_ctx.preferPunkSibling(alloc, roc_path)) |punk_path| {
-            alloc.free(roc_path);
-            return punk_path;
-        }
-        return roc_path;
+        return try std.fs.path.join(alloc, &.{ root_dir, rel.items });
     }
 
     /// Execute a parse task (pure function)

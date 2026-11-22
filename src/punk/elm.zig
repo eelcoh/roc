@@ -111,6 +111,7 @@ const helpers = std.StaticStringMap(Helper).initComptime(.{
     .{ "Maybe.with_default", Helper{ .name = "punk_maybe_with_default", .arity = 2, .def = "punk_maybe_with_default = |d, m| match m { Just(x) => x, Nothing => d }" } },
     .{ "Maybe.map", Helper{ .name = "punk_maybe_map", .arity = 2, .def = "punk_maybe_map = |f, m| match m { Just(x) => Just(f(x)), Nothing => Nothing }" } },
     .{ "Maybe.and_then", Helper{ .name = "punk_maybe_and_then", .arity = 2, .def = "punk_maybe_and_then = |f, m| match m { Just(x) => f(x), Nothing => Nothing }" } },
+    .{ "Result.and_then", Helper{ .name = "punk_result_and_then", .arity = 2, .def = "punk_result_and_then = |f, r| match r { Ok(x) => f(x), Err(e) => Err(e) }" } },
     .{ "Result.to_maybe", Helper{ .name = "punk_result_to_maybe", .arity = 1, .def = "punk_result_to_maybe = |r| match r { Ok(x) => Just(x), Err(_) => Nothing }" } },
     .{ "Result.from_maybe", Helper{ .name = "punk_result_from_maybe", .arity = 2, .def = "punk_result_from_maybe = |e, m| match m { Just(x) => Ok(x), Nothing => Err(e) }" } },
     // String

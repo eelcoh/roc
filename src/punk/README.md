@@ -48,8 +48,13 @@ find another `zig` than your interactive shell, because it does not read
 
 ## In the compiler
 
-The compiler translates `.punk` files as it reads them (`CoreCtx.readFile`),
-so everything after the parser sees ordinary Roc:
+The compiler translates `.punk` files as it reads them, so everything after
+the parser sees ordinary Roc. All of punk's connection to the Roc compiler is
+in `src/punk/roc/` (the seam); the rest of `src/punk/` uses no Roc code. The
+seam puts a layer over the build's filesystem (`src/punk/roc/vfs.zig`) that
+translates `.punk` files, and Roc's own files only call into it from a few
+places marked `// punkroc:` (`build.zig`, `src/build/modules.zig`,
+`src/cli/main.zig`, `src/cli/cli_args.zig`, `src/compile/compile_build.zig`).
 
 ```
 zig build roc
@@ -57,7 +62,8 @@ zig-out/bin/roc examples/punk/aoc_day2_functional.punk
 zig-out/bin/roc check examples/punk/aoc_day2_functional.punk
 ```
 
-`import Foo` finds `Foo.punk` when there is no `Foo.roc` next to it. A module
+`import Foo` finds `Foo.punk` when there is no `Foo.roc` next to it: the
+layer answers for `Foo.roc` with the translation of `Foo.punk`. A module
 file starts with an Elm-style header; it becomes a Roc type module:
 
 ```
@@ -74,7 +80,7 @@ carries the block (`Shape := [Circle(F64), ...].{ area = ... }`). See
 Error messages are about the `.punk` file, not its Roc translation. The
 translator keeps a source map (where each name, literal and operator of the
 translation came from), and every report about a `.punk` file is rewritten
-with it before it is shown (`src/compile/punk_report.zig`): positions and
+with it before it is shown (`src/punk/roc/report.zig`): positions and
 source lines come from the `.punk` file, and names are spelled as in punkroc.
 
 ```
@@ -120,7 +126,7 @@ file alone and says so. `punk2roc --fmt file.punk` prints the formatted file.
 The golden tests check that every file in `examples/punk/` is formatted.
 
 **`punk check --json file.punk`** writes the problems as one JSON document on
-stdout (`src/cli/punk_json.zig`): per problem the severity, a stable `code`
+stdout (`src/punk/roc/json.zig`): per problem the severity, a stable `code`
 (`P101` for a punk rule, `P001` for other punkroc syntax errors,
 `roc/type-mismatch` for what the type checker finds), the title, the place in
 the `.punk` file (1-based line and column, and where it ends) and the message
@@ -373,7 +379,7 @@ so `a + b` still crashes on overflow, as in Roc.
 
 - **Accessor functions.** `.name` on its own is `fn r -> r.name`:
   `List.map .name people`, `List.map .0 pairs`.
-- **`Result.andThen`** chains steps that may fail (Roc's new `Try.and_then`):
+- **`Result.andThen`** chains steps that may fail (a helper the translator writes, like `Maybe.andThen`):
   `grid |> List.get row |> Result.andThen (List.get col)`.
 - **`Set.empty` and `Dict.empty`** are values, as in Elm (Roc's `Set.empty()`).
 - **`import Grid exposing (Grid, at)`** takes Elm's parentheses (and

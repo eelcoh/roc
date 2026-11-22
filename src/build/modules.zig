@@ -250,6 +250,7 @@ pub const ModuleType = enum {
     tracy,
     builtins,
     punk,
+    punk_roc,
     ctx,
     build_options,
     layout_shape,
@@ -337,13 +338,18 @@ pub const ModuleType = enum {
                 .extra_imports = &.{ "vendor_parse_float", "vendor_ryu", "roc_str_view" },
                 .tests = .{ .unit = .{ .aggregators = &.{"builtins tests"} } },
             },
+            // punkroc: the translator (no Roc code), and its seam with the compiler.
             .punk => .{
                 .root = "src/punk/mod.zig",
                 .tests = .{ .unit = .{} },
             },
+            .punk_roc => .{
+                .root = "src/punk/roc/mod.zig",
+                .deps = &.{ .punk, .ctx, .compile, .base, .reporting },
+                .tests = .{ .no_tests = "the seam is tested by test/punk/golden.sh" },
+            },
             .ctx => .{
                 .root = "src/ctx/mod.zig",
-                .deps = &.{.punk},
                 .tests = .{ .unit = .{} },
             },
             .build_options => .{
@@ -470,7 +476,7 @@ pub const ModuleType = enum {
             },
             .compile => .{
                 .root = "src/compile/mod.zig",
-                .deps = &.{ .tracy, .build_options, .ctx, .builtins, .collections, .base, .types, .parse, .can, .check, .reporting, .layout, .static_data, .eval, .unbundle, .roc_target, .backend, .lir, .symbol, .sljmp, .punk },
+                .deps = &.{ .tracy, .build_options, .ctx, .builtins, .collections, .base, .types, .parse, .can, .check, .reporting, .layout, .static_data, .eval, .unbundle, .roc_target, .backend, .lir, .symbol, .sljmp },
                 .extra_imports = &.{"compiler_platform_sources"},
                 .tests = .{ .unit = .{ .aggregators = &.{"compile tests"} } },
             },
@@ -604,6 +610,7 @@ pub const RocModules = struct {
     check: *Module,
     tracy: *Module,
     punk: *Module,
+    punk_roc: *Module,
     ctx: *Module,
     build_options: *Module,
     layout_shape: *Module,
