@@ -51,11 +51,11 @@ pub const ColType = struct {
 
     pub const Base = enum { str, int, float, bool };
 
-    fn eql(a: ColType, b: ColType) bool {
+    pub fn eql(a: ColType, b: ColType) bool {
         return a.base == b.base and a.nullable == b.nullable;
     }
 
-    fn name(t: ColType, a: Allocator) Allocator.Error![]const u8 {
+    pub fn name(t: ColType, a: Allocator) Allocator.Error![]const u8 {
         const base = switch (t.base) {
             .str => "Str",
             .int => "Int",
@@ -66,7 +66,7 @@ pub const ColType = struct {
     }
 
     /// The type's name after "a" or "an": "an Int", "a Maybe Str".
-    fn an(t: ColType, a: Allocator) Allocator.Error![]const u8 {
+    pub fn an(t: ColType, a: Allocator) Allocator.Error![]const u8 {
         const n = try t.name(a);
         return std.fmt.allocPrint(a, "{s} {s}", .{ if (n[0] == 'I') "an" else "a", n });
     }
@@ -84,7 +84,7 @@ pub const Column = struct {
 
 /// Who may do an operation on a table: everyone, nobody, or the users for
 /// whom a function of the user and the row is true. Each becomes a
-/// row-level security policy in Postgres (`schemaSql`), so the database
+/// row-level security policy in Postgres (`securitySql`), so the database
 /// itself keeps to it, also for SQL that doesn't come from a query.
 pub const Access = union(enum) {
     everyone,
@@ -108,7 +108,7 @@ pub const Op = enum {
     update,
     delete,
 
-    fn verb(op: Op) []const u8 {
+    pub fn verb(op: Op) []const u8 {
         return switch (op) {
             .read => "read",
             .insert => "insert",
@@ -127,11 +127,11 @@ pub const Table = struct {
     access: [4]Access,
 
     /// The table's name in SQL without quotes (`links`).
-    fn plain(t: *const Table) []const u8 {
+    pub fn plain(t: *const Table) []const u8 {
         return if (t.sql[0] == '"') t.sql[1 .. t.sql.len - 1] else t.sql;
     }
 
-    fn column(t: *const Table, name: []const u8) ?*const Column {
+    pub fn column(t: *const Table, name: []const u8) ?*const Column {
         for (t.columns) |*c| if (std.mem.eql(u8, c.name, name)) return c;
         return null;
     }
@@ -292,7 +292,7 @@ fn findAlias(items: []const tr.Item, name: []const u8) ?*tr.Type {
     return null;
 }
 
-fn columnType(ty: *tr.Type) ?ColType {
+pub fn columnType(ty: *tr.Type) ?ColType {
     switch (ty.*) {
         .paren => |inner| return columnType(inner),
         .name => |n| return .{ .base = baseType(n) orelse return null },
@@ -332,58 +332,52 @@ const sql_keywords = [_][]const u8{
 
 /// How a name is written in SQL: as it is, or in double quotes when it is a
 /// keyword (`"user"`).
-fn sqlIdent(a: Allocator, plain: []const u8) Allocator.Error![]const u8 {
+pub fn sqlIdent(a: Allocator, plain: []const u8) Allocator.Error![]const u8 {
     for (sql_keywords) |k| if (std.mem.eql(u8, k, plain)) return std.fmt.allocPrint(a, "\"{s}\"", .{plain});
     return plain;
 }
 
-/// `CREATE TABLE` statements for the tables of a module, as `punk schema`
-/// prints them, so that the database holds what the program says.
-pub fn schemaSql(a: Allocator, tables: []const *const Table) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(a,
-        \\-- Made by `punk check --schema` from the tables of the program. Until punk
-        \\-- has verified migrations (roadmap B2), a change to a table is a change you
-        \\-- also make to the database by hand.
-        \\
-        \\
-    );
-    for (tables, 0..) |t, ti| {
-        if (ti > 0) try out.appendSlice(a, "\n");
-        try out.print(a, "CREATE TABLE IF NOT EXISTS {s} (\n", .{t.sql});
-        for (t.columns, 0..) |c, i| {
-            const sql_ty = switch (c.ty.base) {
-                .str => "text",
-                .int => "bigint",
-                .float => "double precision",
-                .bool => "boolean",
-            };
-            const constraint: []const u8 = if (t.key != null and t.key.? == i) " PRIMARY KEY" else if (c.ty.nullable) "" else " NOT NULL";
-            try out.print(a, "    {s} {s}{s}{s}\n", .{ c.sql, sql_ty, constraint, if (i + 1 < t.columns.len) "," else "" });
-        }
-        try out.appendSlice(a, ");\n");
-        try policiesSql(a, &out, t);
+/// The `CREATE TABLE` statement of a table.
+pub fn createSql(a: Allocator, out: *std.ArrayList(u8), t: *const Table) Allocator.Error!void {
+    try out.print(a, "CREATE TABLE {s} (\n", .{t.sql});
+    for (t.columns, 0..) |c, i| {
+        const constraint: []const u8 = if (t.key != null and t.key.? == i) " PRIMARY KEY" else if (c.ty.nullable) "" else " NOT NULL";
+        try out.print(a, "    {s} {s}{s}{s}\n", .{ c.sql, sqlType(c.ty), constraint, if (i + 1 < t.columns.len) "," else "" });
     }
-    return out.items;
+    try out.appendSlice(a, ");\n");
 }
 
-/// Row-level security for a table: Postgres only gives the rows a policy
-/// allows, also to SQL that doesn't come from a query, and also to the
-/// owner of the table (FORCE). An operation that is 'nobody' gets no policy,
-/// so no row is allowed. The policies are dropped and made again, so the
-/// schema can be applied more than once.
-fn policiesSql(a: Allocator, out: *std.ArrayList(u8), t: *const Table) Allocator.Error!void {
+/// The Postgres type of a column.
+pub fn sqlType(ty: ColType) []const u8 {
+    return switch (ty.base) {
+        .str => "text",
+        .int => "bigint",
+        .float => "double precision",
+        .bool => "boolean",
+    };
+}
+
+/// The row-level security of a new table: Postgres only gives the rows a
+/// policy allows, also to SQL that doesn't come from a query, and also to
+/// the owner of the table (FORCE).
+pub fn securitySql(a: Allocator, out: *std.ArrayList(u8), t: *const Table) Allocator.Error!void {
     try out.print(a, "ALTER TABLE {s} ENABLE ROW LEVEL SECURITY;\n", .{t.sql});
     try out.print(a, "ALTER TABLE {s} FORCE ROW LEVEL SECURITY;\n", .{t.sql});
+    try policiesSql(a, out, t);
+}
+
+/// The name of the policy of a table for an operation (`links_read`).
+pub fn policyName(a: Allocator, table_plain: []const u8, op: Op) Allocator.Error![]const u8 {
+    return sqlIdent(a, try std.fmt.allocPrint(a, "{s}_{s}", .{ table_plain, op.verb() }));
+}
+
+/// The policy of each operation: `everyone` is `true`, a function its SQL.
+/// An operation that is `nobody` gets no policy, so no row is allowed.
+pub fn policiesSql(a: Allocator, out: *std.ArrayList(u8), t: *const Table) Allocator.Error!void {
     for (t.access, 0..) |access, i| {
         const op: Op = @enumFromInt(i);
-        const name = try sqlIdent(a, try std.fmt.allocPrint(a, "{s}_{s}", .{ t.plain(), op.verb() }));
-        try out.print(a, "DROP POLICY IF EXISTS {s} ON {s};\n", .{ name, t.sql });
-        const cond = switch (access) {
-            .nobody => continue,
-            .everyone => "true",
-            .rule => |sql| sql,
-        };
+        const cond = policyCond(access) orelse continue;
+        const name = try policyName(a, t.plain(), op);
         const command = switch (op) {
             .read => "SELECT",
             .insert => "INSERT",
@@ -397,6 +391,15 @@ fn policiesSql(a: Allocator, out: *std.ArrayList(u8), t: *const Table) Allocator
             .read, .delete => try out.print(a, " USING ({s});\n", .{cond}),
         }
     }
+}
+
+/// The SQL condition of a policy, null for `nobody`.
+pub fn policyCond(access: Access) ?[]const u8 {
+    return switch (access) {
+        .nobody => null,
+        .everyone => "true",
+        .rule => |sql| sql,
+    };
 }
 
 // Queries
@@ -426,7 +429,7 @@ pub fn tableAsValue(e: *Emitter, name: []const u8) Error {
     return e.errAtRule(name, .not_in_database, try std.fmt.allocPrint(e.a, "'{s}' is a table: it starts a query, as in {s} |> {s}.all, and is not a value on its own", .{ name, name, alias }));
 }
 
-const Param = struct { expr: *Expr, ty: ColType };
+pub const Param = struct { expr: *Expr, ty: ColType };
 
 /// What a query gives for each row.
 const Shape = union(enum) {
@@ -915,7 +918,7 @@ fn checkLiteral(e: *Emitter, value: *Expr, ty: ColType, column: []const u8) Erro
 
 /// Writes the SQL for an expression in a query's function, whose row is
 /// called `row`.
-const Sql = struct {
+pub const Sql = struct {
     e: *Emitter,
     table: *const Table,
     row: ?[]const u8,
@@ -925,6 +928,8 @@ const Sql = struct {
     /// has no parameters: its values are the row, the user and constants.
     user: ?[]const u8 = null,
     policy: bool = false,
+    /// What the expression is in, for errors: "a policy", "a migration".
+    what: []const u8 = "a policy",
 
     fn w(q: *Sql, s: []const u8) Allocator.Error!void {
         try q.out.appendSlice(q.e.a, s);
@@ -967,7 +972,7 @@ const Sql = struct {
     /// Writes the SQL of `x` and gives its type. `want` is the type the
     /// place it is in asks for (a parameter takes it); `prec` the precedence
     /// of the operator around it.
-    fn expr(q: *Sql, x: *Expr, want: ?ColType, prec: u8) Error!ColType {
+    pub fn expr(q: *Sql, x: *Expr, want: ?ColType, prec: u8) Error!ColType {
         const a = q.e.a;
         if (q.policy) if (try q.policyLeaf(x, want)) |ty| return ty;
         if (!q.policy and !q.mentionsRow(x)) {
@@ -1074,7 +1079,10 @@ const Sql = struct {
     }
 
     fn notInPolicy(q: *Sql, x: *Expr) Error {
-        return q.e.errAtRule(exprText(x) orelse "", .not_in_database, try std.fmt.allocPrint(q.e.a, "a policy can use the columns of the row, the fields of the user ({s}.id), constants, ==, /=, <, <=, >, >=, &&, ||, not, +, -, * and ++", .{q.user orelse "user"}));
+        if (q.user == null) {
+            return q.e.errAtRule(exprText(x) orelse "", .not_in_database, try std.fmt.allocPrint(q.e.a, "{s} can use the columns of the row, constants, ==, /=, <, <=, >, >=, &&, ||, not, +, -, * and ++", .{q.what}));
+        }
+        return q.e.errAtRule(exprText(x) orelse "", .not_in_database, try std.fmt.allocPrint(q.e.a, "{s} can use the columns of the row, the fields of the user ({s}.id), constants, ==, /=, <, <=, >, >=, &&, ||, not, +, -, * and ++", .{ q.what, q.user.? }));
     }
 
     fn binop(q: *Sql, x: *Expr, op: []const u8, lhs: *Expr, rhs: *Expr, outer: u8) Error!ColType {
@@ -1149,6 +1157,7 @@ const Sql = struct {
     }
 
     fn notInDatabase(q: *Sql, x: *Expr) Error {
+        if (q.policy) return q.notInPolicy(x);
         return q.e.errAtRule(exprText(x) orelse "", .not_in_database, "this can't run in the database. A query's function can use the fields of the row, values from outside the query, ==, /=, <, <=, >, >=, &&, ||, not, +, -, * and ++. Compute other values before the query and use them in it.");
     }
 };
@@ -1167,13 +1176,13 @@ fn isNumber(t: ColType) bool {
     return t.base == .int or t.base == .float;
 }
 
-fn unparen(x_in: *Expr) *Expr {
+pub fn unparen(x_in: *Expr) *Expr {
     var x = x_in;
     while (x.* == .paren) x = x.paren;
     return x;
 }
 
-fn isNothing(x_in: *Expr) bool {
+pub fn isNothing(x_in: *Expr) bool {
     var x = x_in;
     while (x.* == .paren) x = x.paren;
     return x.* == .upper and std.mem.eql(u8, x.upper, "Nothing");
@@ -1186,7 +1195,7 @@ fn sqlOp(op: []const u8) []const u8 {
     return op;
 }
 
-fn literalType(x: *Expr) ?ColType {
+pub fn literalType(x: *Expr) ?ColType {
     return switch (x.*) {
         .string => .{ .base = .str },
         .literal => |l| if (l.len > 0 and l[0] == '\'') null else if (std.mem.findAny(u8, l, ".eE") != null and !std.mem.startsWith(u8, l, "0x")) .{ .base = .float } else .{ .base = .int },
@@ -1195,7 +1204,7 @@ fn literalType(x: *Expr) ?ColType {
 }
 
 /// Source text to point an error at, for the expressions that have one.
-fn exprText(x_in: *Expr) ?[]const u8 {
+pub fn exprText(x_in: *Expr) ?[]const u8 {
     var x = x_in;
     while (x.* == .paren) x = x.paren;
     return switch (x.*) {

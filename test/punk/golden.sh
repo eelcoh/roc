@@ -8,7 +8,7 @@
 #     sh test/punk/golden.sh --update   write the expected output anew
 #
 # Server apps are only type-checked here (their crate's cargo test runs them).
-# A schema.sql next to an app has to be what `punk check --schema` prints.
+# A schema.sql next to an app has to be up to date (`punk check --schema`).
 # It fails as well when a program in examples/punk/ has no case, so that a
 # new example cannot be forgotten, when a .punk file there is not laid out
 # as `punk fmt` would, and when src/punk/llms.txt is out of date.
@@ -91,19 +91,22 @@ for f in $server_apps; do
     fi
 done
 
-# A schema.sql next to an app with tables is what `punk check --schema`
-# prints for it, so the database holds what the program declares.
+# A schema.sql next to an app with tables is up to date: `punk check
+# --schema` (run on a copy, as it writes schema.sql) has no version to add.
 for schema in $(find examples/punk -name schema.sql | sort); do
     app=$(grep -l '^table ' "$(dirname "$schema")"/*.punk 2>/dev/null | head -n 1)
+    copy="$work/schema/$(dirname "$schema")"
+    mkdir -p "$copy"
+    if [ -n "$app" ]; then cp "$app" "$schema" "$copy/"; fi
     if [ -z "$app" ]; then
         echo "FAIL $schema: no .punk file next to it declares a table"
         failed=$((failed + 1))
-    elif "$roc" check --schema "$app" > "$work/schema" 2>&1 && diff -u "$schema" "$work/schema" > "$work/diff"; then
+    elif "$roc" check --schema "$copy/$(basename "$app")" > "$work/schema.out" 2>&1 && grep -q 'is up to date' "$work/schema.out"; then
         echo "ok   schema $schema"
         passed=$((passed + 1))
     else
-        echo "FAIL schema $schema: run '$roc check --schema $app > $schema'"
-        sed 's/^/     /' "$work/diff" "$work/schema" | tail -n 30
+        echo "FAIL schema $schema: run '$roc check --schema $app'"
+        sed 's/^/     /' "$work/schema.out" | tail -n 30
         failed=$((failed + 1))
     fi
 done

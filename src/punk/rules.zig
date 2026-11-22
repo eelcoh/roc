@@ -15,6 +15,7 @@
 //! | P402 | a query is a pipeline from a table, and its functions can run in the database |
 //! | P403 | a query uses columns the table has, with values of their type |
 //! | P404 | a query only does what the table's policy allows, and `Db.runAs!` only where a policy looks at the user |
+//! | P405 | the tables are what the last version of `schema.sql` says, or a `migrate` says how their rows change |
 
 /// One rule of the punk check layer.
 pub const Rule = enum {
@@ -26,6 +27,7 @@ pub const Rule = enum {
     not_in_database,
     query_type,
     not_allowed,
+    migration,
 
     /// The rule's stable code, such as `P101`.
     pub fn code(r: Rule) []const u8 {
@@ -38,6 +40,7 @@ pub const Rule = enum {
             .not_in_database => "P402",
             .query_type => "P403",
             .not_allowed => "P404",
+            .migration => "P405",
         };
     }
 };

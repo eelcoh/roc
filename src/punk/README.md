@@ -340,7 +340,8 @@ tool or an agent can recognise it without reading the text
 | `P401` | A `table` has a record of storable columns as its rows (`Str`, `Int`, `Float`, `Bool`, `Maybe` of these), a key that is one of them, and says who may read, insert, update and delete. No rows are open by accident. |
 | `P402` | A query is a pipeline from a table that ends in `Db.all`, `Db.first`, `Db.update` or `Db.delete` (or is a `Db.insert`), and its functions can run in the database (src/punk/query.zig). |
 | `P403` | A query uses columns its table has, with values of their type. |
-| `P404` | A query only does what its table's policy allows. |
+| `P404` | A query only does what its table's policy allows, and `Db.runAs!` is only used where a policy looks at the user. |
+| `P405` | The tables are what the last version of `schema.sql` says; a changed table has a `migrate` until `punk check --schema` has added its version (src/punk/migrate.zig). |
 
 ```
 Day01.punk:12:9: P101: 'crash' is only allowed inside an 'expect' test. A program must not stop halfway: ...

@@ -11,8 +11,10 @@ pub const Interface = interface.Interface;
 pub const Diagnostic = translate_mod.Diagnostic;
 pub const Error = translate_mod.Error;
 pub const translate = translate_mod.translate;
-/// The `CREATE TABLE` statements for the tables of a `.punk` file.
+/// The schema of the tables of a `.punk` file, as the history of versions in
+/// its `schema.sql` (src/punk/migrate.zig).
 pub const schema = translate_mod.schema;
+pub const SchemaResult = translate_mod.SchemaResult;
 
 /// `punk fmt`: lays out punkroc source in its one canonical form.
 pub const format = @import("format.zig");
@@ -101,7 +103,7 @@ pub fn toRocWith(allocator: std.mem.Allocator, path: []const u8, src: []const u8
     var resolver: ?translate_mod.Resolver = null;
     if (reader) |r| {
         load_ctx = .{ .reader = r, .dir = std.fs.path.dirname(path) orelse "." };
-        resolver = .{ .ctx = &load_ctx, .load = load };
+        resolver = .{ .ctx = &load_ctx, .load = load, .schema = loadSchema };
     }
     const mapped = translate_mod.translateMapped(arena.allocator(), src, &diag, resolver) catch |err| switch (err) {
         error.ParseError => {
@@ -287,6 +289,13 @@ fn positionOf(lines: []const u32, offset: u32) Position {
 }
 
 const LoadCtx = struct { reader: Reader, dir: []const u8 };
+
+/// The `schema.sql` next to the file being translated.
+fn loadSchema(ctx_ptr: ?*anyopaque, arena: std.mem.Allocator) ?[]const u8 {
+    const ctx: *LoadCtx = @ptrCast(@alignCast(ctx_ptr.?));
+    const path = std.fs.path.join(arena, &.{ ctx.dir, "schema.sql" }) catch return null;
+    return ctx.reader.read(ctx.reader.ctx, arena, path);
+}
 
 fn load(ctx_ptr: ?*anyopaque, arena: std.mem.Allocator, imp: translate_mod.Import) Error!?*const Interface {
     const ctx: *LoadCtx = @ptrCast(@alignCast(ctx_ptr.?));

@@ -11,9 +11,10 @@ policy into a row-level security policy (`schema.sql`), and runs each query
 as the user of the request (`Db.runAs!`).
 
 - `POST /notes` with the text as body: makes a note of the user, 201 with its id.
-- `GET /notes`: the notes the user may read, one per line: `id public text`.
+- `GET /notes`: the notes the user may read, one per line: `id public body`.
 - `POST /notes/<id>/publish`: makes the note public, 404 if it isn't the user's.
-- `DELETE /notes/<id>`: removes the note, 404 if it isn't the user's.
+- `POST /notes/<id>/pin`: pins the note, 404 if it isn't the user's.
+- `DELETE /notes/<id>`: removes the note, 404 if it isn't the user's or is pinned.
 
 The user comes from the header `x-user`, which a proxy in front of the app
 sets once it has signed the user in. Without it the user is nobody, who only
@@ -23,18 +24,23 @@ reads the public notes and writes none.
 type alias Note =
     { id : Str
     , owner : Str
-    , text : Str
+    , body : Str
     , public : Bool
+    , pinned : Bool
     }
 
--- Everyone reads the public notes and their own; only the owner changes or
--- removes a note.
+-- Everyone reads the public notes and their own; only the owner changes a
+-- note, and removes it when it isn't pinned.
 table notes : Note
     key id
     read fn user, note -> note.public || note.owner == user.id
     insert fn user, note -> note.owner == user.id
     update fn user, note -> note.owner == user.id
-    delete fn user, note -> note.owner == user.id
+    delete fn user, note -> note.owner == user.id && not note.pinned
+
+-- In version 2 of schema.sql `text` became `body`, and notes can be pinned.
+-- Its migration was `fn old -> { old | body = old.text, pinned = False }`;
+-- once schema.sql has a version, the migrate that made it goes.
 
 type alias User =
     { id : Str
@@ -50,6 +56,12 @@ publish = fn id ->
     notes
         |> Db.filter (fn note -> note.id == id)
         |> Db.update (fn note -> { note | public = True })
+
+pin : Str -> Db.Query Int
+pin = fn id ->
+    notes
+        |> Db.filter (fn note -> note.id == id)
+        |> Db.update (fn note -> { note | pinned = True })
 
 remove : Str -> Db.Query Int
 remove = fn id ->
@@ -79,6 +91,7 @@ route! = fn user, req ->
         ("POST", ["", "notes"]) -> add! user req.body
         ("GET", ["", "notes"]) -> list! user
         ("POST", ["", "notes", id, "publish"]) -> changed (try Db.runAs! user (publish id))
+        ("POST", ["", "notes", id, "pin"]) -> changed (try Db.runAs! user (pin id))
         ("DELETE", ["", "notes", id]) -> changed (try Db.runAs! user (remove id))
         _ -> Ok (text 404 "not found\n")
 
@@ -88,7 +101,7 @@ add! = fn user, body ->
         Err _ -> Ok (text 400 "a note is text\n")
         Ok noteText ->
             id = "n${U64.toStr (Random.u64! ())}"
-            note = { id, owner = user.id, text = noteText, public = False }
+            note = { id, owner = user.id, body = noteText, public = False, pinned = False }
             _ = try Db.runAs! user (Db.insert note notes)
             Ok (text 201 "${id}\n")
 
@@ -97,7 +110,7 @@ list! = fn user ->
     found = try Db.runAs! user readable
     lines =
         found
-            |> List.map (fn note -> "${note.id} ${if note.public then "public" else "private"} ${note.text}\n")
+            |> List.map (fn note -> "${note.id} ${if note.public then "public" else "private"} ${note.body}\n")
             |> Str.joinWith ""
     Ok (text 200 lines)
 

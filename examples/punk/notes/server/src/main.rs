@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("DATABASE_URL names no user")?
         .to_owned();
     let owner = Owner::connect(&owner_url)?;
-    owner.batch(notes::SCHEMA)?;
+    owner.migrate(notes::SCHEMA)?;
     owner.grant(&app_role)?;
     drop(owner);
 

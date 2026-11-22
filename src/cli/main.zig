@@ -21147,22 +21147,32 @@ fn writeDefaultAppCheckWatchInputs(
     try writeWatchInputSetFile(ctx, file_path, &input_set);
 }
 
-/// `punk check --schema app.punk`: the `CREATE TABLE` statements for the
-/// tables the file declares (src/punk/query.zig), so that the database holds
-/// what the program says.
+/// `punk check --schema app.punk`: brings the `schema.sql` next to the app
+/// up to date with the tables it declares, adding a version when they
+/// changed (src/punk/migrate.zig), and says what the new version does.
 fn rocCheckSchema(ctx: *CliCtx, path: []const u8) RocCheckError!void {
     const stdout = ctx.io.stdout();
     const stderr = ctx.io.stderr();
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const src = std.Io.Dir.cwd().readFileAlloc(ctx.io.std_io, path, arena, .limited(256 * 1024 * 1024)) catch |err| {
+    const cwd = std.Io.Dir.cwd();
+    const src = cwd.readFileAlloc(ctx.io.std_io, path, arena, .limited(256 * 1024 * 1024)) catch |err| {
         try stderr.print("{s}: cannot read: {s}\n", .{ path, @errorName(err) });
         ctx.io.flush();
         return error.CheckFailed;
     };
+    const schema_path = try std.fs.path.join(arena, &.{ std.fs.path.dirname(path) orelse ".", "schema.sql" });
+    const existing: ?[]const u8 = cwd.readFileAlloc(ctx.io.std_io, schema_path, arena, .limited(256 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            try stderr.print("{s}: cannot read: {s}\n", .{ schema_path, @errorName(err) });
+            ctx.io.flush();
+            return error.CheckFailed;
+        },
+    };
     var diag: punk.Diagnostic = .{};
-    const sql = punk.schema(arena, src, &diag) catch |err| switch (err) {
+    const result = punk.schema(arena, src, existing, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ParseError => {
             try stderr.print("{s}:{d}:{d}: {s}\n", .{ path, diag.line, diag.col, diag.message });
@@ -21170,7 +21180,17 @@ fn rocCheckSchema(ctx: *CliCtx, path: []const u8) RocCheckError!void {
             return error.CheckFailed;
         },
     };
-    try stdout.print("{s}", .{sql});
+    if (!result.changed) {
+        try stdout.print("{s} is up to date\n", .{schema_path});
+        ctx.io.flush();
+        return;
+    }
+    cwd.writeFile(ctx.io.std_io, .{ .sub_path = schema_path, .data = result.sql }) catch |err| {
+        try stderr.print("{s}: cannot write: {s}\n", .{ schema_path, @errorName(err) });
+        ctx.io.flush();
+        return error.CheckFailed;
+    };
+    try stdout.print("{s}: {s}", .{ schema_path, result.report });
     ctx.io.flush();
 }
 

@@ -1412,11 +1412,18 @@ test "queries: keywords as names, and the schema" {
     const out = try punk.translate(arena.allocator(), src, &diag);
     try std.testing.expect(std.mem.find(u8, out, "q = |u| Q.changes([Q.param_text(u)], \"DELETE FROM \\\"order\\\" WHERE \\\"user\\\" = $1 AND paid\")") != null);
     try std.testing.expectEqualStrings(
-        \\-- Made by `punk check --schema` from the tables of the program. Until punk
-        \\-- has verified migrations (roadmap B2), a change to a table is a change you
-        \\-- also make to the database by hand.
+        \\-- Made by `punk check --schema` from the tables of the program: one version
+        \\-- for each change of the tables. The wiring applies each version once, in
+        \\-- order, and refuses a version that changed after it was applied. Change
+        \\-- the tables in the program, not this file.
         \\
-        \\CREATE TABLE IF NOT EXISTS "order" (
+        \\-- punk version 1
+        \\-- table order : orderId Int key, user Str, total Float, paid Bool, memo Maybe Str
+        \\-- policy order read true
+        \\-- policy order insert -
+        \\-- policy order update -
+        \\-- policy order delete true
+        \\CREATE TABLE "order" (
         \\    order_id bigint PRIMARY KEY,
         \\    "user" text NOT NULL,
         \\    total double precision NOT NULL,
@@ -1425,14 +1432,10 @@ test "queries: keywords as names, and the schema" {
         \\);
         \\ALTER TABLE "order" ENABLE ROW LEVEL SECURITY;
         \\ALTER TABLE "order" FORCE ROW LEVEL SECURITY;
-        \\DROP POLICY IF EXISTS order_read ON "order";
         \\CREATE POLICY order_read ON "order" FOR SELECT USING (true);
-        \\DROP POLICY IF EXISTS order_insert ON "order";
-        \\DROP POLICY IF EXISTS order_update ON "order";
-        \\DROP POLICY IF EXISTS order_delete ON "order";
         \\CREATE POLICY order_delete ON "order" FOR DELETE USING (true);
         \\
-    , try punk.schema(arena.allocator(), src, &diag));
+    , (try punk.schema(arena.allocator(), src, null, &diag)).sql);
 }
 
 const policy_head =
@@ -1463,21 +1466,17 @@ test "policies: functions of the user and the row are row-level security" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diag: punk.Diagnostic = .{};
-    const schema = punk.schema(arena.allocator(), policy_head, &diag) catch |err| {
+    const schema = (punk.schema(arena.allocator(), policy_head, null, &diag) catch |err| {
         std.debug.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.col, diag.message });
         return err;
-    };
+    }).sql;
     const policies = schema[std.mem.find(u8, schema, "ALTER TABLE").?..];
     try std.testing.expectEqualStrings(
         \\ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
         \\ALTER TABLE notes FORCE ROW LEVEL SECURITY;
-        \\DROP POLICY IF EXISTS notes_read ON notes;
         \\CREATE POLICY notes_read ON notes FOR SELECT USING (public OR owner = NULLIF(current_setting('punk.user_id', true), '') OR NULLIF(current_setting('punk.user_is_admin', true), '')::boolean);
-        \\DROP POLICY IF EXISTS notes_insert ON notes;
         \\CREATE POLICY notes_insert ON notes FOR INSERT WITH CHECK (owner = NULLIF(current_setting('punk.user_id', true), '') AND level <= NULLIF(current_setting('punk.user_level', true), '')::bigint);
-        \\DROP POLICY IF EXISTS notes_update ON notes;
         \\CREATE POLICY notes_update ON notes FOR UPDATE USING (NULLIF(current_setting('punk.user_is_admin', true), '')::boolean) WITH CHECK (NULLIF(current_setting('punk.user_is_admin', true), '')::boolean);
-        \\DROP POLICY IF EXISTS notes_delete ON notes;
         \\CREATE POLICY notes_delete ON notes FOR DELETE USING (owner = 'it''s me' AND level > 2);
         \\
     , policies);
@@ -1550,4 +1549,180 @@ test "rules: tables and queries (P401..P404)" {
     try checkRule(query_head ++ "q = fn id -> Db.insert { id } links\n", 19, 14, .query_type);
     // P404: what the policy forbids.
     try checkRule(query_head ++ "q = links |> Db.delete\n", 19, 14, .not_allowed);
+}
+
+/// `schema.sql` after `punk check --schema` on `src`, with `existing` as
+/// the one there was.
+fn schemaOf(arena: std.mem.Allocator, src: []const u8, existing: ?[]const u8) ![]const u8 {
+    var diag: punk.Diagnostic = .{};
+    const result = punk.schema(arena, src, existing, &diag) catch |err| {
+        std.debug.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.col, diag.message });
+        return err;
+    };
+    return result.sql;
+}
+
+const links_v1 =
+    \\type alias Link =
+    \\    { id : Str
+    \\    , url : Str
+    \\    , created : Int
+    \\    , note : Str
+    \\    }
+    \\
+    \\table links : Link
+    \\    key id
+    \\    read everyone
+    \\    insert everyone
+    \\    update nobody
+    \\    delete nobody
+    \\
+;
+
+const links_v2 =
+    \\type alias Link =
+    \\    { id : Str
+    \\    , url : Str
+    \\    , createdAt : Int
+    \\    , owner : Str
+    \\    , later : Int
+    \\    , note : Maybe Str
+    \\    }
+    \\
+    \\table links : Link
+    \\    key id
+    \\    read everyone
+    \\    insert everyone
+    \\    update nobody
+    \\    delete nobody
+    \\
+;
+
+test "migrations: a version for each change of the tables" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const v1 = try schemaOf(arena, links_v1, null);
+    // Nothing changed: the same schema.sql.
+    try std.testing.expectEqualStrings(v1, try schemaOf(arena, links_v1, v1));
+
+    // A rename, a new column with a value, a computed one, and a column that
+    // becomes a Maybe.
+    const v2 = try schemaOf(arena, links_v2 ++
+        \\
+        \\migrate links
+        \\    fn old -> { old | createdAt = old.created, owner = "anonymous", later = old.created + 10 }
+        \\
+    , v1);
+    try std.testing.expect(std.mem.startsWith(u8, v2, v1));
+    try std.testing.expectEqualStrings(
+        \\
+        \\-- punk version 2
+        \\-- table links : id Str key, url Str, createdAt Int, owner Str, later Int, note Maybe Str
+        \\-- policy links read true
+        \\-- policy links insert true
+        \\-- policy links update -
+        \\-- policy links delete -
+        \\DROP POLICY IF EXISTS links_read ON links;
+        \\DROP POLICY IF EXISTS links_insert ON links;
+        \\DROP POLICY IF EXISTS links_update ON links;
+        \\DROP POLICY IF EXISTS links_delete ON links;
+        \\ALTER TABLE links NO FORCE ROW LEVEL SECURITY;
+        \\ALTER TABLE links ADD COLUMN owner text;
+        \\ALTER TABLE links ADD COLUMN later bigint;
+        \\UPDATE links SET owner = 'anonymous', later = created + 10;
+        \\ALTER TABLE links RENAME COLUMN created TO created_at;
+        \\ALTER TABLE links ALTER COLUMN owner SET NOT NULL;
+        \\ALTER TABLE links ALTER COLUMN later SET NOT NULL;
+        \\ALTER TABLE links ALTER COLUMN note DROP NOT NULL;
+        \\ALTER TABLE links FORCE ROW LEVEL SECURITY;
+        \\CREATE POLICY links_read ON links FOR SELECT USING (true);
+        \\CREATE POLICY links_insert ON links FOR INSERT WITH CHECK (true);
+        \\
+    , v2[v1.len..]);
+
+    // A new Maybe column and a new policy need no migration; a removed
+    // column is dropped.
+    const v3_src =
+        \\type alias Link =
+        \\    { id : Str
+        \\    , url : Str
+        \\    , createdAt : Int
+        \\    , owner : Str
+        \\    , later : Int
+        \\    , tag : Maybe Str
+        \\    }
+        \\
+        \\table links : Link
+        \\    key id
+        \\    read fn user, link -> link.owner == user.id
+        \\    insert everyone
+        \\    update nobody
+        \\    delete nobody
+        \\
+    ;
+    const v3 = try schemaOf(arena, v3_src ++ "\nmigrate links\n    fn old -> { old | tag = Nothing }\n", v2);
+    try std.testing.expectEqualStrings(
+        \\
+        \\-- punk version 3
+        \\-- table links : id Str key, url Str, createdAt Int, owner Str, later Int, tag Maybe Str
+        \\-- policy links read owner = NULLIF(current_setting('punk.user_id', true), '')
+        \\-- policy links insert true
+        \\-- policy links update -
+        \\-- policy links delete -
+        \\DROP POLICY IF EXISTS links_read ON links;
+        \\DROP POLICY IF EXISTS links_insert ON links;
+        \\DROP POLICY IF EXISTS links_update ON links;
+        \\DROP POLICY IF EXISTS links_delete ON links;
+        \\ALTER TABLE links NO FORCE ROW LEVEL SECURITY;
+        \\ALTER TABLE links ADD COLUMN tag text;
+        \\ALTER TABLE links DROP COLUMN note;
+        \\ALTER TABLE links FORCE ROW LEVEL SECURITY;
+        \\CREATE POLICY links_read ON links FOR SELECT USING (owner = NULLIF(current_setting('punk.user_id', true), ''));
+        \\CREATE POLICY links_insert ON links FOR INSERT WITH CHECK (true);
+        \\
+    , v3[v2.len..]);
+    // Only the policy: no migration needed.
+    const v2b = try schemaOf(arena, std.mem.concat(arena, u8, &.{ links_v2[0..std.mem.find(u8, links_v2, "    read everyone").?], "    read fn user, link -> link.owner == user.id\n    insert everyone\n    update nobody\n    delete nobody\n" }) catch unreachable, v2);
+    try std.testing.expect(std.mem.find(u8, v2b[v2.len..], "ALTER TABLE") == null);
+    try std.testing.expect(std.mem.find(u8, v2b[v2.len..], "CREATE POLICY links_read ON links FOR SELECT USING (owner = ") != null);
+}
+
+test "rules: migrations (P405)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const v1 = try schemaOf(arena, links_v1, null);
+    const cases = [_]struct { src: []const u8, line: u32, col: u32, rule: punk.Rule }{
+        // A changed table without a migration.
+        .{ .src = links_v2, .line = 10, .col = 7, .rule = .migration },
+        // A migration that doesn't say what a new column is.
+        .{ .src = links_v2 ++ "\nmigrate links\n    fn old -> { old | createdAt = old.created }\n", .line = 17, .col = 9, .rule = .migration },
+        // A column the table doesn't have now.
+        .{ .src = links_v2 ++ "\nmigrate links\n    fn old -> { old | created = old.created }\n", .line = 18, .col = 23, .rule = .migration },
+        // A value of the wrong type.
+        .{ .src = links_v2 ++ "\nmigrate links\n    fn old -> { old | createdAt = old.created, owner = 5, later = 1 }\n", .line = 18, .col = 56, .rule = .query_type },
+        // Something the database can't compute.
+        .{ .src = links_v2 ++ "\nmigrate links\n    fn old -> { old | createdAt = old.created, owner = String.toLower old.url, later = 1 }\n", .line = 18, .col = 56, .rule = .not_in_database },
+        // A migration of a table that didn't change.
+        .{ .src = links_v1 ++ "\nmigrate links\n    fn old -> old\n", .line = 15, .col = 9, .rule = .migration },
+        // ... or isn't one.
+        .{ .src = links_v1 ++ "\nmigrate users\n    fn old -> old\n", .line = 15, .col = 9, .rule = .migration },
+    };
+    for (cases) |c| {
+        var diag: punk.Diagnostic = .{};
+        if (punk.schema(arena, c.src, v1, &diag)) |_| {
+            std.debug.print("expected an error for:\n{s}\n", .{c.src});
+            return error.TestUnexpectedResult;
+        } else |_| {}
+        std.testing.expectEqualStrings(c.rule.code(), diag.code) catch |err| {
+            std.debug.print("{s}\n", .{diag.message});
+            return err;
+        };
+        std.testing.expectEqual(c.line, diag.line) catch |err| {
+            std.debug.print("{s}\n", .{diag.message});
+            return err;
+        };
+        try std.testing.expectEqual(c.col, diag.col);
+    }
 }

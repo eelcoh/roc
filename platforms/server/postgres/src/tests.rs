@@ -227,3 +227,85 @@ fn a_role_that_skips_row_level_security_is_refused() {
     assert!(e.message.contains("row-level security"), "{}", e.message);
     assert_eq!(db.state.lock().unwrap().open, 0);
 }
+
+const V1: &str = "-- made by punk
+
+-- punk version 1
+CREATE TABLE t (id text PRIMARY KEY, n bigint NOT NULL);
+";
+
+const V2: &str = "
+-- punk version 2
+ALTER TABLE t ADD COLUMN m bigint;
+UPDATE t SET m = n * 2;
+ALTER TABLE t ALTER COLUMN m SET NOT NULL;
+";
+
+/// An owner of a fresh schema, with nothing in it.
+fn owner(name: &str) -> Option<(Owner, Postgres)> {
+    testing::database(&format!("punk_migrate_{name}"), "")
+}
+
+#[test]
+fn migrate_applies_each_version_once() {
+    let Some((owner, db)) = owner("once") else {
+        return;
+    };
+    assert_eq!(owner.migrate(V1).unwrap(), [1]);
+    assert_eq!(owner.migrate(V1).unwrap(), Vec::<u32>::new());
+    owner.grant(testing::APP_ROLE).unwrap();
+    db.run("INSERT INTO t VALUES ('a', 21)", &[]).unwrap();
+    // A new version keeps the rows, and computes the new column for them.
+    assert_eq!(owner.migrate(&format!("{V1}{V2}")).unwrap(), [2]);
+    let rows = db.run("SELECT m FROM t", &[]).unwrap();
+    assert_eq!(rows.rows, vec![vec![Value::Int(42)]]);
+    assert_eq!(
+        owner.migrate(&format!("{V1}{V2}")).unwrap(),
+        Vec::<u32>::new()
+    );
+}
+
+#[test]
+fn migrate_refuses_a_version_that_changed() {
+    let Some((owner, _)) = owner("changed") else {
+        return;
+    };
+    owner.migrate(V1).unwrap();
+    let e = owner.migrate(&V1.replace("bigint", "integer")).unwrap_err();
+    assert_eq!(e.code, "P0405");
+    assert!(e.message.contains("version 1"), "{}", e.message);
+    // The comment before the first version is no part of it.
+    assert!(
+        owner
+            .migrate(&V1.replace("made by", "made with"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_failed_version_changes_nothing() {
+    let Some((owner, _)) = owner("failed") else {
+        return;
+    };
+    owner.migrate(V1).unwrap();
+    let broken = "\n-- punk version 2\nALTER TABLE t ADD COLUMN m bigint;\nALTER TABLE nothing ADD COLUMN x bigint;\n";
+    assert!(owner.migrate(&format!("{V1}{broken}")).is_err());
+    // Version 2 was not applied, nor any part of it.
+    assert_eq!(owner.migrate(&format!("{V1}{V2}")).unwrap(), [2]);
+}
+
+#[test]
+fn versions_count_up_from_one() {
+    let Some((owner, _)) = owner("count") else {
+        return;
+    };
+    assert_eq!(
+        owner
+            .migrate("CREATE TABLE t (n bigint);")
+            .unwrap_err()
+            .code,
+        "P0405"
+    );
+    assert_eq!(owner.migrate(V2).unwrap_err().code, "P0405");
+}

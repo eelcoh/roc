@@ -325,6 +325,7 @@ Positions are 1-based and in the `.punk` file. `code` is stable:
 | `P402` | a query that can't run in the database: not a pipeline from a table to `Db.all`/`first`/`update`/`delete`, or a function the database can't run |
 | `P403` | a query uses a column the table doesn't have, or a value of the wrong type |
 | `P404` | a query does what the table's policy forbids (`delete nobody`), or `Db.runAs!` where no policy looks at the user |
+| `P405` | the tables differ from `schema.sql`: run `punk check --schema`, with a `migrate` when rows change; or a `migrate` that is done |
 | `roc/<title>` | a problem the type checker found, such as `roc/type-mismatch`, `roc/name-not-in-scope`, `roc/missing-method` |
 
 Warnings (`severity: "warning"`) do not stop the program. A warning
@@ -400,7 +401,8 @@ Declare a table in punk, with the type of its rows, its key and who may
 read, insert, update and delete its rows (a table without all four doesn't
 compile, P401). Queries are pipelines from the table; punk turns each one
 into one SQL statement with parameters, and checks the columns and their
-types. `punk check --schema app.punk` prints the `CREATE TABLE`.
+types. `punk check --schema app.punk` writes `schema.sql` next to the app:
+the versions of the tables, which the wiring applies in order.
 
 ```
 import pf.Db
@@ -448,6 +450,21 @@ and Roc checks that the record given to `Db.runAs!` has them. A policy uses
 the columns, the fields of the user and constants. The app's database role
 must keep to row-level security: the host refuses a superuser or a role with
 `BYPASSRLS`.
+
+When a table changes, the program doesn't compile (P405) until `punk check
+--schema` has added a version to `schema.sql`. A new table, a new `Maybe`
+column and a new policy need nothing more; any other change needs a
+migration from the old row to the new one, which is removed again once the
+version is in `schema.sql`:
+
+```
+migrate links
+    fn old -> { old | createdAt = old.created, owner = "anonymous" }
+```
+
+`createdAt = old.created` renames a column, another value is computed in the
+database for the rows there are (as in a query, without values from
+outside), and an old column the new row doesn't take is dropped.
 
 ```
 Db.filter : (row -> Bool) -> query -> query       -- several filters: AND

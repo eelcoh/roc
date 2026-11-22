@@ -107,11 +107,30 @@ findLink = fn id ->
   that owns them) and lets the app's role use them with `Owner::grant`;
   `examples/punk/notes` shows it, and `punk_server_postgres::testing` sets
   up both roles for tests.
-- **The schema comes from the program.** `punk check --schema app.punk`
-  prints the `CREATE TABLE` statements (`Str` is `text`, `Int` `bigint`,
-  `Float` `double precision`, `Bool` `boolean`, `Maybe` nullable, the key
-  `PRIMARY KEY`). The golden tests check that `schema.sql` next to an app is
-  what it prints.
+- **The schema comes from the program, with verified migrations.**
+  `schema.sql` next to the app is a history of versions, which `punk check
+  --schema app.punk` writes (`Str` is `text`, `Int` `bigint`, `Float`
+  `double precision`, `Bool` `boolean`, `Maybe` nullable, the key `PRIMARY
+  KEY`). Each version records the tables as they were. When the tables in
+  the program differ from the last version, the program doesn't compile
+  (P405) until `punk check --schema` has added a version. A new table, a new
+  `Maybe` column or a new policy needs nothing else; any other change of a
+  table needs a migration, a function from the old row to the new one:
+
+  ```
+  migrate notes
+      fn old -> { old | body = old.text, pinned = False }
+  ```
+
+  `body = old.text` is a rename; another value (`False`, `old.created +
+  10`, the same expressions as in a query, without values from outside) is
+  computed in the database for the rows there are; an old column the new row
+  doesn't take is dropped. `punk check --schema` says what the new version
+  does. Once it is in `schema.sql`, remove the `migrate` (P405 says so). The
+  wiring applies the versions with `Owner::migrate`: each once, in order, in a
+  transaction of its own, recorded in the table `punk_schema`; a version that
+  changed after it was applied is an error. `examples/punk/notes` has two
+  versions.
 - **SQL by hand stays.** For what the language can't do yet (joins, sorting,
   aggregates, more than one table), `Sql.query` and `Row` below are the
   escape hatch.
@@ -167,8 +186,11 @@ The database itself is the crate `postgres/` (`punk-server-postgres`), for
 the wiring on Linux and macOS:
 
 ```rust
+let owner = punk_server_postgres::Owner::connect(&std::env::var("DATABASE_OWNER_URL")?)?;
+owner.migrate(include_str!("../../schema.sql"))?;     // the app's tables, at their last version
+owner.grant("app")?;                                   // the app's role may use them
+drop(owner);
 let database = punk_server_postgres::Postgres::new(&std::env::var("DATABASE_URL")?, 8)?;
-database.batch(include_str!("../../schema.sql"))?;   // the app's tables
 Lockdown::new().allow(&database) ...                   // its port (and the resolver for a name)
 let app = punk_server::App::new(clock, random, kv, config).with_database(database);
 ```

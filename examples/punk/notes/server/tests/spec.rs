@@ -131,11 +131,47 @@ fn sql_outside_the_app_keeps_to_the_policies_too() {
     let rows = db
         .run_as(
             &[("punk.user_id".to_owned(), "ann".to_owned())],
-            "SELECT text FROM notes",
+            "SELECT body FROM notes",
             &[],
         )
         .unwrap();
     assert_eq!(rows.rows, vec![vec![Value::Text("ann's plan".into())]]);
     // The owner of the table may look (the test database's owner is a superuser).
     owner.batch("SELECT 1 FROM notes").unwrap();
+}
+
+#[test]
+fn a_pinned_note_is_not_removed() {
+    let Some((app, _, _)) = setup("pinned") else {
+        return;
+    };
+    let id = add(&app, "ann", "keep me");
+    let pin = by(Some("ann"), "POST", &format!("/notes/{id}/pin"), "");
+    assert_eq!(send(&app, pin).0, StatusCode::OK);
+    let delete = by(Some("ann"), "DELETE", &format!("/notes/{id}"), "");
+    assert_eq!(send(&app, delete).0, StatusCode::NOT_FOUND);
+    assert_eq!(texts(&app, Some("ann")), ["private keep me"]);
+}
+
+#[test]
+fn notes_from_before_version_2_are_kept() {
+    // A database that has version 1 of the schema, with a note in it.
+    let v1 = &notes::SCHEMA[..notes::SCHEMA.find("\n-- punk version 2").unwrap()];
+    let Some((owner, db)) = testing::database("punk_notes_v1", v1) else {
+        return;
+    };
+    owner
+        .batch("INSERT INTO notes (id, owner, text, public) VALUES ('n1', 'ann', 'from before', false)")
+        .unwrap();
+    // The wiring brings it to the last version: `text` is `body`, and the
+    // note isn't pinned.
+    assert_eq!(owner.migrate(notes::SCHEMA).unwrap(), [2]);
+    assert!(owner.migrate(notes::SCHEMA).unwrap().is_empty());
+    let db = std::sync::Arc::new(db);
+    let clock = SimClock::at(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let app = notes::init(clock, SeededRandom::new(1), db.clone());
+    assert_eq!(texts(&app, Some("ann")), ["private from before"]);
+    assert!(texts(&app, Some("bob")).is_empty());
+    let delete = by(Some("ann"), "DELETE", "/notes/n1", "");
+    assert_eq!(send(&app, delete).0, StatusCode::OK);
 }

@@ -17,6 +17,8 @@
 //! - `Db.runAs! user query` runs the query in a transaction whose settings (`punk.user_id`) say
 //!   who the user is; the policies read them. They end with the transaction, so the next query
 //!   on the connection is nobody's again.
+//! - [`Owner::migrate`] applies the versions of a `schema.sql` that the database doesn't have
+//!   yet, and refuses one that changed after it was applied.
 //! - Without TLS for now: for a database on the same machine or a private network.
 
 use std::collections::HashMap;
@@ -264,6 +266,65 @@ impl Owner {
         client.batch_execute(sql).map_err(db_error)
     }
 
+    /// Brings the database up to the last version of `schema` (the `schema.sql` that
+    /// `punk check --schema` makes): applies each version the database doesn't have yet, in
+    /// order, each in a transaction of its own, and records it in the table `punk_schema`. A
+    /// version that was applied before but reads differently now is an error: the database
+    /// would not hold what the program declares. Gives the versions it applied.
+    pub fn migrate(&self, schema: &str) -> Result<Vec<u32>, DbError> {
+        let versions = versions(schema)?;
+        let mut client = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        client
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS punk_schema (
+                     version integer PRIMARY KEY,
+                     sha256 text NOT NULL,
+                     applied_at timestamptz NOT NULL DEFAULT now()
+                 )",
+            )
+            .map_err(db_error)?;
+        let mut applied = Vec::new();
+        for (version, sql) in versions {
+            let mut tx = client.transaction().map_err(db_error)?;
+            // One wiring at a time: two servers starting at once apply a version once.
+            tx.batch_execute("SELECT pg_advisory_xact_lock(707275)")
+                .map_err(db_error)?;
+            let row = tx
+                .query_opt(
+                    "SELECT sha256 = encode(sha256(convert_to($2, 'UTF8')), 'hex') FROM punk_schema WHERE version = $1",
+                    &[&(version as i32), &sql],
+                )
+                .map_err(db_error)?;
+            match row {
+                Some(row) if row.get::<_, bool>(0) => continue,
+                Some(_) => {
+                    return Err(DbError::new(
+                        "P0405",
+                        format!(
+                            "version {version} of the schema was applied to this database, but schema.sql has another version {version} now; a version can't change once it has been applied: undo the change, and change the tables in the program instead"
+                        ),
+                    ));
+                }
+                None => {}
+            }
+            tx.batch_execute(sql).map_err(|e| {
+                let e = db_error(e);
+                DbError::new(
+                    e.code,
+                    format!("version {version} of the schema: {}", e.message),
+                )
+            })?;
+            tx.execute(
+                "INSERT INTO punk_schema (version, sha256) VALUES ($1, encode(sha256(convert_to($2, 'UTF8')), 'hex'))",
+                &[&(version as i32), &sql],
+            )
+            .map_err(db_error)?;
+            tx.commit().map_err(db_error)?;
+            applied.push(version);
+        }
+        Ok(applied)
+    }
+
     /// Lets `role` read and change the tables of the current schema, now and the ones made later,
     /// as far as their policies allow.
     pub fn grant(&self, role: &str) -> Result<(), DbError> {
@@ -294,7 +355,7 @@ pub mod testing {
     pub const APP_ROLE: &str = "punk_test_app";
 
     /// A fresh, empty schema `schema` of the test database, with its owner (who has applied
-    /// `schema_sql`) and a pool for the app, as [`APP_ROLE`]. `None` when there is no test
+    /// `schema_sql`: migrated when it is a `schema.sql` of punk, else run as it is) and a pool for the app, as [`APP_ROLE`]. `None` when there is no test
     /// database, unless `PUNK_REQUIRE_POSTGRES` is set (as in CI): then it panics.
     pub fn database(schema: &str, schema_sql: &str) -> Option<(Owner, Postgres)> {
         let Ok(url) = std::env::var("PUNK_TEST_POSTGRES") else {
@@ -317,7 +378,11 @@ pub mod testing {
             .unwrap();
         let url = with_search_path(&url, schema);
         let owner = Owner::connect(&url).unwrap();
-        owner.batch(schema_sql).unwrap();
+        if schema_sql.contains("-- punk version ") {
+            owner.migrate(schema_sql).unwrap();
+        } else {
+            owner.batch(schema_sql).unwrap();
+        }
         owner.grant(APP_ROLE).unwrap();
         let mut config: Config = url.parse().unwrap();
         // Without a database name, Postgres takes the user's: keep the one of the URL.
@@ -338,6 +403,45 @@ pub mod testing {
             format!("{url} options='-c search_path={schema}'")
         }
     }
+}
+
+/// The versions of a `schema.sql`: each starts at a line `-- punk version N`, and they count up
+/// from 1.
+fn versions(schema: &str) -> Result<Vec<(u32, &str)>, DbError> {
+    const MARK: &str = "-- punk version ";
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in schema.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix(MARK) {
+            let version: u32 = rest.trim().parse().map_err(|_| {
+                DbError::new("P0405", format!("schema.sql has a broken line: {line:?}"))
+            })?;
+            if version as usize != starts.len() + 1 {
+                return Err(DbError::new(
+                    "P0405",
+                    format!(
+                        "schema.sql has version {version} where version {} should be",
+                        starts.len() + 1
+                    ),
+                ));
+            }
+            starts.push((version, offset));
+        }
+        offset += line.len();
+    }
+    if starts.is_empty() {
+        return Err(DbError::new(
+            "P0405",
+            "this schema has no versions: give the schema.sql that `punk check --schema` makes",
+        ));
+    }
+    let mut out = Vec::with_capacity(starts.len());
+    for (i, &(version, start)) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).map_or(schema.len(), |&(_, s)| s);
+        // Without the blank lines between versions, which are no part of either.
+        out.push((version, schema[start..end].trim_end()));
+    }
+    Ok(out)
 }
 
 /// `name` as an SQL identifier, in double quotes.
