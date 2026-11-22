@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    # For the Postgres tests of platforms/server/postgres and the shortener on Postgres.
+    # For the Postgres tests of platforms/server/postgres and the apps on Postgres.
     services:
       postgres:
         image: postgres:16
@@ -77,9 +77,11 @@ jobs:
           sh test/punk/setup.sh
           sh test/punk/golden.sh
           # The server apps: ambit's spec against the punk shortener, on a
-          # key-value store and on Postgres.
+          # key-value store and on Postgres, and the notes kept apart by
+          # row-level security.
           (cd examples/punk/shortener/server && cargo test --locked)
           (cd examples/punk/shortener-postgres/server && cargo test --locked)
+          (cd examples/punk/notes/server && cargo test --locked)
 
   upstream:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -89,7 +91,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    # For the Postgres tests of platforms/server/postgres and the shortener on Postgres.
+    # For the Postgres tests of platforms/server/postgres and the apps on Postgres.
     services:
       postgres:
         image: postgres:16
@@ -150,9 +152,11 @@ jobs:
           sh test/punk/setup.sh
           sh test/punk/golden.sh
           # The server apps: ambit's spec against the punk shortener, on a
-          # key-value store and on Postgres.
+          # key-value store and on Postgres, and the notes kept apart by
+          # row-level security.
           (cd examples/punk/shortener/server && cargo test --locked)
           (cd examples/punk/shortener-postgres/server && cargo test --locked)
+          (cd examples/punk/notes/server && cargo test --locked)
       - name: Push the branch and open a PR
         if: steps.merge.outputs.nothing != 'yes'
         run: |

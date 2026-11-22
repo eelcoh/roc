@@ -62,17 +62,54 @@ impl std::error::Error for DbError {}
 pub trait Database: Send + Sync + 'static {
     /// Runs `sql` with these values for `$1`, `$2`, ...
     fn run(&self, sql: &str, params: &[Value]) -> Result<Rows, DbError>;
+
+    /// Runs `sql` in a transaction that has these settings (`punk.user_id` and its value): what
+    /// punk's `Db.runAs! user query` gives, so that the row-level security policies of the tables
+    /// see who the user is. A database without settings can only run a query without them.
+    fn run_as(
+        &self,
+        settings: &[(String, String)],
+        sql: &str,
+        params: &[Value],
+    ) -> Result<Rows, DbError> {
+        if settings.is_empty() {
+            self.run(sql, params)
+        } else {
+            Err(DbError::new(
+                "0A000",
+                "this database can't run a query as a user",
+            ))
+        }
+    }
 }
 
 impl<T: Database + ?Sized> Database for std::sync::Arc<T> {
     fn run(&self, sql: &str, params: &[Value]) -> Result<Rows, DbError> {
         (**self).run(sql, params)
     }
+
+    fn run_as(
+        &self,
+        settings: &[(String, String)],
+        sql: &str,
+        params: &[Value],
+    ) -> Result<Rows, DbError> {
+        (**self).run_as(settings, sql, params)
+    }
 }
 
 impl<T: Database + ?Sized> Database for Box<T> {
     fn run(&self, sql: &str, params: &[Value]) -> Result<Rows, DbError> {
         (**self).run(sql, params)
+    }
+
+    fn run_as(
+        &self,
+        settings: &[(String, String)],
+        sql: &str,
+        params: &[Value],
+    ) -> Result<Rows, DbError> {
+        (**self).run_as(settings, sql, params)
     }
 }
 

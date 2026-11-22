@@ -25,6 +25,7 @@ const elm = @import("elm.zig");
 const numbers = @import("numbers.zig");
 const rules = @import("rules.zig");
 const query = @import("query.zig");
+const migrate = @import("migrate.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Interface = interface.Interface;
@@ -52,6 +53,13 @@ pub const Resolver = struct {
     /// when it cannot be found (a package that is not on disk). Functions of
     /// unknown modules are called as in Roc: all arguments, Roc's order.
     load: *const fn (ctx: ?*anyopaque, arena: Allocator, imp: Import) Error!?*const Interface,
+    /// The `schema.sql` next to the module, null when there is none. A
+    /// module with tables has to match it (P405, migrate.zig).
+    schema: *const fn (ctx: ?*anyopaque, arena: Allocator) ?[]const u8 = noSchema,
+
+    fn noSchema(_: ?*anyopaque, _: Allocator) ?[]const u8 {
+        return null;
+    }
 };
 
 /// Where and why translation failed.
@@ -138,18 +146,19 @@ pub fn sourceSpan(marks: []const Mark, start: u32, end: u32) struct { start: u32
 
 /// The interface of a punkroc module: its functions with their arity, its
 /// types with their tags, and its `exposing` list.
-/// The `CREATE TABLE` statements for the tables a `.punk` module declares
-/// (`punk check --schema`), in the order it declares them.
-pub fn schema(arena: Allocator, src: []const u8, diag: *Diagnostic) Error![]const u8 {
+/// The schema of the tables a `.punk` module declares, as the history of
+/// versions that continues `existing` (its `schema.sql`, null when there is
+/// none yet): `punk check --schema` (migrate.zig).
+pub fn schema(arena: Allocator, src: []const u8, existing: ?[]const u8, diag: *Diagnostic) Error!migrate.Result {
     const toks = try lex(arena, src, diag);
     var p = Parser{ .a = arena, .src = src, .toks = toks, .diag = diag };
     const items = try p.parseModule();
     var e = Emitter{ .a = arena, .diag = diag, .src = src };
     try query.resolveTables(&e, items);
-    var tables: std.ArrayList(*const query.Table) = .empty;
-    for (items) |item| if (item.kind == .table) try tables.append(arena, e.tables.get(item.kind.table.name).?);
-    return query.schemaSql(arena, tables.items);
+    return migrate.history(&e, items, existing);
 }
+
+pub const SchemaResult = migrate.Result;
 
 pub fn punkInterface(arena: Allocator, src: []const u8, diag: *Diagnostic) Error!Interface {
     const toks = try lex(arena, src, diag);
@@ -695,6 +704,8 @@ pub const Item = struct {
         expect: *Block,
         /// `table links : Link` with its key and policy (query.zig).
         table: query.TableDecl,
+        /// `migrate links` and its function (migrate.zig).
+        migrate: migrate.MigrateDecl,
     },
     trailing_comments: []const []const u8 = &.{},
 };
@@ -827,6 +838,11 @@ pub const Parser = struct {
             },
             .lower => {
                 if (std.mem.eql(u8, t.text, "table") and p.peekAt(1).tag == .lower and p.peekAt(2).tag == .colon) return p.parseTable();
+                if (std.mem.eql(u8, t.text, "migrate") and t.col == 1 and p.peekAt(1).tag == .lower and p.peekAt(2).first_on_line and p.peekAt(2).col > 1) {
+                    _ = p.advance();
+                    const table = p.advance().text;
+                    return .{ .migrate = .{ .table = table, .func = try p.parseExpr() } };
+                }
                 if (p.peekAt(1).tag == .colon) {
                     _ = p.advance();
                     _ = p.advance();
@@ -855,6 +871,23 @@ pub const Parser = struct {
             if (t.tag != .lower) return p.errAt(t, "expected a line of the table, such as 'key id' or 'read everyone', but found '{s}'", .{describe(t)});
             const word = p.advance();
             const arg = p.tok();
+            if (arg.tag == .kw_fn and !arg.first_on_line) {
+                // `read fn user, link -> link.owner == user.id`: the policy is
+                // a function, which ends where the next line of the table starts.
+                const saved_stop = p.stop_col;
+                const saved_start = p.stmt_start;
+                p.stop_col = word.col;
+                p.stmt_start = p.pos;
+                defer {
+                    p.stop_col = saved_stop;
+                    p.stmt_start = saved_start;
+                }
+                const policy = try p.parseExpr();
+                const n = p.tok();
+                if (n.tag != .eof and !n.first_on_line) return p.errAt(n, "expected the next line of the table after the policy of '{s}', but found '{s}'", .{ word.text, describe(n) });
+                try lines.append(p.a, .{ .word = word.text, .arg = arg.text, .policy = policy });
+                continue;
+            }
             if (arg.first_on_line or (arg.tag != .lower and arg.tag != .upper)) return p.errAt(arg, "expected what '{s}' is, as in '{s} everyone', but found '{s}'", .{ word.text, word.text, describe(arg) });
             _ = p.advance();
             const n = p.tok();
@@ -1874,6 +1907,8 @@ pub const Emitter = struct {
     db_alias: ?[]const u8 = null,
     /// The tables the module declares, by name (query.zig).
     tables: std.StringHashMapUnmanaged(*query.Table) = .empty,
+    /// The fields of the user that the tables' policies look at (query.zig).
+    db_user: std.ArrayListUnmanaged(query.UserField) = .empty,
 
     /// `order` is not `.none` for names imported unqualified from a Roc
     /// module (`import Json exposing [decode]`).
@@ -1933,6 +1968,7 @@ pub const Emitter = struct {
         };
         try e.findSqlQuery(items);
         try query.resolveTables(e, items);
+        if (e.resolver) |r| if (r.schema != Resolver.noSchema) try migrate.check(e, items, r.schema(r.ctx, e.a));
         try e.loadImports(items);
         try e.bindItems(items);
         if (moduleHeaderName(items) != null) {
@@ -1961,7 +1997,7 @@ pub const Emitter = struct {
                     own_type = item;
                     continue;
                 },
-                .anno, .def, .type_alias, .expect, .table => {},
+                .anno, .def, .type_alias, .expect, .table, .migrate => {},
             }
             try inner.append(e.a, item);
         }
@@ -2017,7 +2053,7 @@ pub const Emitter = struct {
         if (items.len == 0) return null;
         const raw = switch (items[0].kind) {
             .raw => |r| r,
-            .anno, .def, .type_alias, .type_nominal, .expect, .table => return null,
+            .anno, .def, .type_alias, .type_nominal, .expect, .table, .migrate => return null,
         };
         if (!std.mem.startsWith(u8, raw, "module ")) return null;
         const rest = std.mem.trimStart(u8, raw["module ".len..], " ");
@@ -2076,6 +2112,11 @@ pub const Emitter = struct {
                     try e.w(" : ");
                     try e.w(t.row_type);
                 },
+                // A migration is in schema.sql once it has been done.
+                .migrate => |m| {
+                    try e.w("# migrate ");
+                    try e.w(m.table);
+                },
             }
             for (item.trailing_comments) |c| {
                 try e.nl();
@@ -2087,7 +2128,7 @@ pub const Emitter = struct {
     fn definesEquality(items: []const Item) bool {
         for (items) |item| switch (item.kind) {
             .def => |d| if (d.pat.* == .ident and (std.mem.eql(u8, d.pat.ident, "isEq") or std.mem.eql(u8, d.pat.ident, "toHash"))) return true,
-            .raw, .anno, .type_alias, .type_nominal, .expect, .table => {},
+            .raw, .anno, .type_alias, .type_nominal, .expect, .table, .migrate => {},
         };
         return false;
     }
@@ -2306,7 +2347,7 @@ pub const Emitter = struct {
         for (items) |item| switch (item.kind) {
             .anno => |an| try e.scope.append(e.a, .{ .name = try snake(e.a, an.name), .arity = typeArity(an.ty), .anno = true }),
             .def => |d| try e.bindDef(d.pat, d.body),
-            .raw, .type_alias, .type_nominal, .expect, .table => {},
+            .raw, .type_alias, .type_nominal, .expect, .table, .migrate => {},
         };
     }
 
@@ -2546,7 +2587,7 @@ pub const Emitter = struct {
                 try iface.types.put(e.a, tn.name, tags.items);
             },
             .type_alias => |ta| try iface.types.put(e.a, ta.name, &.{}),
-            .raw, .expect, .table => {},
+            .raw, .expect, .table, .migrate => {},
         };
         if (moduleHeaderName(items)) |m| if (iface.types.get(m)) |tags| if (tags.len == 0 and !hasNominal(items, m)) {
             iface.own_alias = m;
@@ -2615,7 +2656,7 @@ pub const Emitter = struct {
                 const msg = try std.fmt.allocPrint(e.a, "'{s}' is exposed, so it needs a type annotation. Write '{s} : ...' on the line above its definition.", .{ raw, raw });
                 return e.errAtRule(raw, .exposed_without_annotation, msg);
             },
-            .raw, .anno, .type_alias, .type_nominal, .expect, .table => {},
+            .raw, .anno, .type_alias, .type_nominal, .expect, .table, .migrate => {},
         };
     }
 

@@ -354,10 +354,20 @@ pub extern "C" fn roc_log_error(message: RocStr) {
     tracing::error!("{}", message.as_str());
 }
 
-/// `Postgres.run_host!`: runs one query on the app's database. The parameters come first, as in
+/// `Postgres.run_host!`: runs one query on the app's database, with the settings of its
+/// transaction (from `Db.runAs!`; none for other queries). The arguments come in the order of
 /// `Postgres.roc`.
 #[unsafe(no_mangle)]
-pub extern "C" fn roc_pg_run(params: RocList<RocCell>, sql: RocStr) -> RocRun {
+pub extern "C" fn roc_pg_run(
+    settings: RocList<RocPair>,
+    params: RocList<RocCell>,
+    sql: RocStr,
+) -> RocRun {
+    let settings: Vec<(String, String)> = settings
+        .as_slice()
+        .iter()
+        .map(|s| (s.first.as_str().to_owned(), s.second.as_str().to_owned()))
+        .collect();
     let mut values = Vec::with_capacity(params.as_slice().len());
     for (i, param) in params.as_slice().iter().enumerate() {
         match database::from_cell(param.kind, param.text.as_str()) {
@@ -370,7 +380,7 @@ pub extern "C" fn roc_pg_run(params: RocList<RocCell>, sql: RocStr) -> RocRun {
             }
         }
     }
-    let result = app(|app| app.database.run(sql.as_str(), &values));
+    let result = app(|app| app.database.run_as(&settings, sql.as_str(), &values));
     match result {
         Ok(rows) => RocRun {
             affected: rows.affected,
