@@ -66,10 +66,16 @@ findLink = fn id ->
 -- SELECT id, url, created FROM links WHERE id = $1 LIMIT 1
 ```
 
-- **Steps.** `Db.filter` (several are joined with AND) and at most one
-  `Db.map` (`.url`, or a record `{ url = l.url, later = l.created + 10 }`),
-  then one of `Db.all`, `Db.first`, `Db.update (fn l -> { l | url = new })`
-  or `Db.delete`. `Db.insert row links` and `Db.insertIfNew row links` (`ON
+- **Steps.** In this order: `Db.join users (fn l, u -> l.owner == u.id)`,
+  `Db.filter` (several are joined with AND), `Db.sortBy` and
+  `Db.sortByDescending` (the last one decides first, as with `List.sortBy`),
+  `Db.drop n` (`OFFSET`), `Db.take n` (`LIMIT`) and at most one `Db.map`
+  (`.url`, or a record `{ url = l.url, later = l.created + 10 }`), then one
+  of `Db.all`, `Db.first`, `Db.update (fn l -> { l | url = new })` or
+  `Db.delete` (these two take only filters). After a join each function
+  takes a row of each table (`fn link, user -> ...`), the query is still one
+  statement (`FROM links t0 JOIN users t1 ON ...`), and it ends in a `map`
+  that names what it gives. `Db.insert row links` and `Db.insertIfNew row links` (`ON
   CONFLICT DO NOTHING`) add a row. `Db.run!` runs a `Db.Query a`; the
   changing ones give the number of rows changed. `Db.runAs! user query`
   runs it as the user, for the tables whose policies look at the user.
@@ -131,9 +137,17 @@ findLink = fn id ->
   transaction of its own, recorded in the table `punk_schema`; a version that
   changed after it was applied is an error. `examples/punk/notes` has two
   versions.
-- **SQL by hand stays.** For what the language can't do yet (joins, sorting,
-  aggregates, more than one table), `Sql.query` and `Row` below are the
-  escape hatch.
+- **Transactions.** `Db.transaction! (fn _ -> ...)` runs a function of
+  queries in one transaction, on one connection: `Ok` commits it, `Err`
+  rolls it back. `Db.transactionAs! user (fn _ -> ...)` gives it the fields
+  of the user, and its queries run as that user (`Db.runAs! user`; a query
+  as someone else is error `25000`). Transactions don't nest (`25001`), and
+  one the app leaves open rolls back at the end of the request. In the host
+  it is `Database::begin`, which gives a `Transaction` (`run`, `commit`;
+  dropping it rolls back). `examples/punk/notes` pins one note per user this
+  way.
+- **SQL by hand stays.** For what the language can't do yet (left joins,
+  aggregates, grouping), `Sql.query` and `Row` below are the escape hatch.
 
 ## Postgres: SQL by hand
 
@@ -295,14 +309,8 @@ shortener checks it too).
 
 ## Not there yet
 
-- Transactions: each query commits on its own. A `Transaction a` value (as
-  in Acadia) comes with B2.
-- Row-level security: every table has a policy now, but only `everyone` or
-  `nobody`, checked by the compiler. Policies on the user and the row, as
-  Postgres row-level security, come with B2; until then the database's own
-  roles are the wiring's job.
-- The query language: joins, sorting, paging and aggregates (B2 and later),
-  tables shared between modules, own types as columns (`type LinkId =
+- The query language: left joins, aggregates and grouping, tables shared
+  between modules, removing or renaming a whole table in a migration, own types as columns (`type LinkId =
   LinkId Str`), and checking `Sql.query`'s SQL against the tables.
 - TLS to the database (`NoTls` now: for a database on the same machine or a
   private network), and Postgres on hermit (the `postgres` crate needs

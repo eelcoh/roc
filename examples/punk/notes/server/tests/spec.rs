@@ -165,7 +165,7 @@ fn notes_from_before_version_2_are_kept() {
         .unwrap();
     // The wiring brings it to the last version: `text` is `body`, and the
     // note isn't pinned.
-    assert_eq!(owner.migrate(notes::SCHEMA).unwrap(), [2]);
+    assert_eq!(owner.migrate(notes::SCHEMA).unwrap(), [2, 3]);
     assert!(owner.migrate(notes::SCHEMA).unwrap().is_empty());
     let db = std::sync::Arc::new(db);
     let clock = SimClock::at(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
@@ -174,4 +174,57 @@ fn notes_from_before_version_2_are_kept() {
     assert!(texts(&app, Some("bob")).is_empty());
     let delete = by(Some("ann"), "DELETE", "/notes/n1", "");
     assert_eq!(send(&app, delete).0, StatusCode::OK);
+}
+
+#[test]
+fn public_notes_come_with_the_names_of_their_writers() {
+    let Some((app, _, _)) = setup("names") else {
+        return;
+    };
+    let name = |user: Option<&str>, name: &str| send(&app, by(user, "PUT", "/me", name)).0;
+    assert_eq!(name(Some("ann"), "Ann"), StatusCode::CREATED);
+    assert_eq!(name(Some("ann"), "Ann B"), StatusCode::OK);
+    assert_eq!(name(Some("bob"), "Bob"), StatusCode::CREATED);
+    // Nobody has no name to give.
+    assert_eq!(name(None, "Who"), StatusCode::FORBIDDEN);
+    let publish = |user: &str, text: &str| {
+        let id = add(&app, user, text);
+        let req = by(Some(user), "POST", &format!("/notes/{id}/publish"), "");
+        assert_eq!(send(&app, req).0, StatusCode::OK);
+    };
+    publish("bob", "b1");
+    publish("ann", "a2");
+    publish("ann", "a1");
+    add(&app, "ann", "secret");
+    // Carl has no name: the join leaves his note out.
+    publish("carl", "c1");
+    let (status, body) = send(&app, by(None, "GET", "/public", ""));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "Ann B: a1\nAnn B: a2\nBob: b1\n");
+}
+
+#[test]
+fn one_pinned_note_per_user_in_a_transaction() {
+    let Some((app, _, _)) = setup("pin_one") else {
+        return;
+    };
+    let first = add(&app, "ann", "first");
+    let second = add(&app, "ann", "second");
+    let pin = |user: &str, id: &str| {
+        send(
+            &app,
+            by(Some(user), "POST", &format!("/notes/{id}/pin"), ""),
+        )
+        .0
+    };
+    let delete = |id: &str| send(&app, by(Some("ann"), "DELETE", &format!("/notes/{id}"), "")).0;
+    assert_eq!(pin("ann", &first), StatusCode::OK);
+    assert_eq!(pin("ann", &second), StatusCode::OK);
+    // A note that isn't there, or isn't hers: the unpinning rolls back with it.
+    assert_eq!(pin("ann", "nope"), StatusCode::NOT_FOUND);
+    assert_eq!(pin("bob", &second), StatusCode::NOT_FOUND);
+    assert_eq!(delete(&second), StatusCode::NOT_FOUND);
+    // The first lost its pin when the second got one.
+    assert_eq!(delete(&first), StatusCode::OK);
+    assert_eq!(texts(&app, Some("ann")), ["private second"]);
 }

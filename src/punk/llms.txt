@@ -468,7 +468,12 @@ database for the rows there are (as in a query, without values from
 outside), and an old column the new row doesn't take is dropped.
 
 ```
+Db.join : table -> (row -> row2 -> Bool) -> query -- JOIN ... ON; the steps after it take a row of each
 Db.filter : (row -> Bool) -> query -> query       -- several filters: AND
+Db.sortBy : (row -> key) -> query -> query        -- ORDER BY ... ASC; the last sortBy decides first
+Db.sortByDescending : (row -> key) -> query -> query
+Db.drop : Int -> query -> query                   -- OFFSET
+Db.take : Int -> query -> query                   -- LIMIT
 Db.map : (row -> b) -> query -> query             -- .url, or a record { url = l.url, ... }
 Db.all : query -> Db.Query (List row)             -- ends a query
 Db.first : query -> Db.Query (Maybe row)          -- LIMIT 1
@@ -478,7 +483,41 @@ Db.update : (row -> row) -> query -> Db.Query Int -- (fn l -> { l | url = new })
 Db.delete : query -> Db.Query Int
 Db.run! : Db.Query a => Result a _                -- errors: PgErr { code, message }, RowErr Str
 Db.runAs! : user -> Db.Query a => Result a _      -- as the user, for the policies; 42501 when one refuses
+Db.transaction! : ({} => Result a e) => Result a e        -- Ok commits, Err rolls back
+Db.transactionAs! : user -> ({} => Result a e) => Result a e
 Db.toSql : Db.Query a -> Str
+```
+
+Joins, sorting and paging stay one SQL statement. The steps come in this
+order: `join`, `filter`, `sortBy`, `drop`, `take`, `map`; after a `join` each
+function takes a row of each table, and the query ends with a `map` that
+names what it gives:
+
+```
+publicNotes : Db.Query (List { name : Str, body : Str })
+publicNotes =
+    notes
+        |> Db.join people (fn note, person -> note.owner == person.id)
+        |> Db.filter (fn note, _ -> note.public)
+        |> Db.sortBy (fn note, _ -> note.body)
+        |> Db.sortBy (fn _, person -> person.name)   -- by name, then by body
+        |> Db.take 20
+        |> Db.map (fn note, person -> { name = person.name, body = note.body })
+        |> Db.all
+```
+
+A transaction runs a function of queries on one connection: all of its
+changes hold when it gives `Ok`, none when it gives `Err`. The queries in
+`Db.transactionAs! user` run as that user (`Db.runAs! user`); transactions
+don't nest.
+
+```
+pinOnly! = fn user, id ->
+    _ = try Db.runAs! user (unpinAll user.id)
+    count = try Db.runAs! user (pin id)
+    if count == 0 then Err NotFound else Ok count
+
+-- Db.transactionAs! user (fn _ -> pinOnly! user id)
 ```
 
 Column types: `Str`, `Int`, `Float`, `Bool`, and `Maybe` of one of these
@@ -486,10 +525,11 @@ Column types: `Str`, `Int`, `Float`, `Bool`, and `Maybe` of one of these
 `filter`, `map` and `update` are written in the query (`fn link -> ...`) and
 use only the row's fields, values from outside the query (they become
 parameters), `==`, `/=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `not`, `+`, `-`,
-`*` and `++`; anything else is P402: compute it before the query. `filter`
-comes before `map`, and a query has at most one `map`. A table's name is not
-a value: it only starts a query. For what the query language can't do yet
-(joins, sorting, aggregates), write the SQL yourself with `Sql.query`:
+`*` and `++`; anything else is P402: compute it before the query. A query
+has at most one `map`, `take` and `drop`; `update` and `delete` only take
+filters. A table's name is not a value: it only starts a query. For what the
+query language can't do yet (left joins, aggregates, grouping), write the
+SQL yourself with `Sql.query`:
 
 ### Postgres: SQL by hand
 

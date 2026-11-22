@@ -1491,6 +1491,20 @@ test "policies: functions of the user and the row are row-level security" {
         \\}
         \\
     , out[start..]);
+
+    // `Db.transactionAs!` gives them to the transaction of a function.
+    const tx = try punk.translate(arena.allocator(), policy_head ++ "main! = fn u -> Db.transactionAs! u (fn _ -> Db.runAs! u (notes |> Db.delete))\n", &diag);
+    const tx_start = std.mem.find(u8, tx, "main! = ").?;
+    try std.testing.expectEqualStrings(
+        \\main! = |u| {
+        \\    punk_user1 = u
+        \\    Db.transaction_as!([Db.setting_text("punk.user_id", punk_user1.id), Db.setting_bool("punk.user_is_admin", punk_user1.is_admin), Db.setting_int("punk.user_level", punk_user1.level)], (|_| {
+        \\        punk_user2 = u
+        \\        Db.run_as!([Db.setting_text("punk.user_id", punk_user2.id), Db.setting_bool("punk.user_is_admin", punk_user2.is_admin), Db.setting_int("punk.user_level", punk_user2.level)], Db.changes([], "DELETE FROM notes"))
+        \\    }))
+        \\}
+        \\
+    , tx[tx_start..]);
 }
 
 test "rules: policies (P401..P404)" {
@@ -1538,7 +1552,7 @@ test "rules: tables and queries (P401..P404)" {
     try checkRule(query_head ++ "q = fn f -> links |> Db.filter f |> Db.all\n", 19, 32, .not_in_database);
     try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.id == \"x\")\n", 19, 14, .not_in_database);
     try checkRule(query_head ++ "q = links\n", 19, 5, .not_in_database);
-    try checkRule(query_head ++ "q = links |> Db.map .url |> Db.filter (fn u -> u == \"x\") |> Db.all\n", 19, 14, .not_in_database);
+    try checkRule(query_head ++ "q = links |> Db.map .url |> Db.filter (fn u -> u == \"x\") |> Db.all\n", 19, 29, .not_in_database);
     try checkRule(query_head ++ "q = Db.all\n", 19, 5, .not_in_database);
     // P403: columns the table has, values of their type.
     try checkRule(query_head ++ "q = links |> Db.filter (fn l -> l.name == \"x\") |> Db.all\n", 19, 35, .query_type);
@@ -1725,4 +1739,104 @@ test "rules: migrations (P405)" {
         };
         try std.testing.expectEqual(c.col, diag.col);
     }
+}
+
+test "queries: sorting, take and drop" {
+    // The last sort decides first, as with List.sortBy; take and drop are
+    // parameters.
+    try checkQuery(
+        \\q = fn n ->
+        \\    links
+        \\        |> Db.filter (fn l -> l.created > 5)
+        \\        |> Db.sortBy .url
+        \\        |> Db.sortByDescending (fn l -> l.created * 2)
+        \\        |> Db.drop (n * 10)
+        \\        |> Db.take 10
+        \\        |> Db.map .url
+        \\        |> Db.all
+        \\
+    ,
+        \\q = |n| Db.all_rows([Db.param_int(5), Db.param_int(2), Db.param_int(10), Db.param_int((n * 10))], "SELECT url FROM links WHERE created > $1 ORDER BY created * $2 DESC, url ASC LIMIT $3 OFFSET $4", Db.field(Db.read_text, "url", Db.done))
+        \\
+    );
+    try checkQuery("q = links |> Db.sortBy .created |> Db.first\n",
+        \\q = Db.first_row([], "SELECT id, url, created, note FROM links ORDER BY created ASC LIMIT 1", Db.field(Db.read_text, "id", |punk_c1| Db.field(Db.read_text, "url", |punk_c2| Db.field(Db.read_int, "created", |punk_c3| Db.field(Db.read_nullable(Db.read_text), "note", |punk_c4| Db.done({ id: punk_c1, url: punk_c2, created: punk_c3, note: punk_c4 }))))))
+        \\
+    );
+}
+
+const join_head =
+    \\app [main!] { pf: platform "p.roc" }
+    \\
+    \\import pf.Db
+    \\
+    \\type alias Link =
+    \\    { id : Str
+    \\    , url : Str
+    \\    , owner : Str
+    \\    }
+    \\
+    \\type alias User =
+    \\    { id : Str
+    \\    , name : Str
+    \\    , active : Bool
+    \\    }
+    \\
+    \\table links : Link
+    \\    key id
+    \\    read everyone
+    \\    insert everyone
+    \\    update nobody
+    \\    delete nobody
+    \\
+    \\table users : User
+    \\    key id
+    \\    read everyone
+    \\    insert everyone
+    \\    update nobody
+    \\    delete nobody
+    \\
+    \\
+;
+
+test "queries: a join is one SQL statement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diag: punk.Diagnostic = .{};
+    const src = join_head ++
+        \\q = fn min ->
+        \\    links
+        \\        |> Db.join users (fn link, user -> link.owner == user.id)
+        \\        |> Db.filter (fn _, user -> user.active && user.name > min)
+        \\        |> Db.sortBy (fn link, _ -> link.url)
+        \\        |> Db.map (fn link, user -> { url = link.url, name = user.name })
+        \\        |> Db.all
+        \\
+    ;
+    const out = punk.translate(arena.allocator(), src, &diag) catch |err| {
+        std.debug.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.col, diag.message });
+        return err;
+    };
+    const start = std.mem.find(u8, out, "q = ").?;
+    try std.testing.expectEqualStrings(
+        \\q = |min| Db.all_rows([Db.param_text(min)], "SELECT t0.url AS url, t1.name AS name FROM links t0 JOIN users t1 ON t0.owner = t1.id WHERE t1.active AND t1.name > $1 ORDER BY t0.url ASC", Db.field(Db.read_text, "url", |punk_c1| Db.field(Db.read_text, "name", |punk_c2| Db.done({ url: punk_c1, name: punk_c2 }))))
+        \\
+    , out[start..]);
+}
+
+test "rules: sorting and joins (P402, P403)" {
+    // Steps in their order: no filter after a sort.
+    try checkRule(query_head ++ "q = links |> Db.sortBy .url |> Db.filter (fn l -> l.created > 1) |> Db.all\n", 19, 32, .not_in_database);
+    // take and first.
+    try checkRule(query_head ++ "q = links |> Db.take 3 |> Db.first\n", 19, 14, .not_in_database);
+    // No sort before an update.
+    try checkRule(query_head ++ "q = links |> Db.sortBy .url |> Db.update (fn l -> { l | url = \"x\" })\n", 19, 14, .not_in_database);
+    // A number for take.
+    try checkRule(query_head ++ "q = links |> Db.take \"ten\" |> Db.all\n", 19, 22, .query_type);
+    // A join needs a map and a function of both rows.
+    const head = join_head;
+    try checkRule(head ++ "q = links |> Db.join users (fn l, u -> l.owner == u.id) |> Db.all\n", 31, 60, .not_in_database);
+    try checkRule(head ++ "q = links |> Db.join users (fn l -> l.owner == \"x\") |> Db.map .url |> Db.all\n", 31, 32, .not_in_database);
+    try checkRule(head ++ "q = links |> Db.join users (fn l, u -> l.owner == u.name) |> Db.map (fn l, u -> l) |> Db.all\n", 31, 81, .not_in_database);
+    try checkRule(head ++ "q = links |> Db.join users (fn l, u -> l.owner == u.age) |> Db.map (fn l, _ -> l.url) |> Db.all\n", 31, 53, .query_type);
 }

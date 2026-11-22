@@ -14,6 +14,9 @@ platform ""
         "roc_log_error": Log.error!,
         "roc_log_info": Log.info!,
         "roc_log_warn": Log.warn!,
+        "roc_pg_begin": Postgres.begin_host!,
+        "roc_pg_commit": Postgres.commit_host!,
+        "roc_pg_rollback": Postgres.rollback_host!,
         "roc_pg_run": Postgres.run_host!,
         "roc_random_u64": Random.u64!,
     }

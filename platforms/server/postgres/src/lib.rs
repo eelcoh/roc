@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use ambit_lockdown::{Grant, Grants};
@@ -35,13 +35,17 @@ use postgres::{Client, NoTls, Statement};
 
 /// A connection string, read with `str::parse` and changed with its setters.
 pub use postgres::Config;
-use punk_server::{Database, DbError, Rows, Value};
+use punk_server::{Database, DbError, Rows, Transaction, Value};
 
 /// How many prepared statements a connection keeps; past that it starts again.
 const STATEMENTS: usize = 256;
 
 /// A pool of connections to one Postgres database.
 pub struct Postgres {
+    pool: Arc<Pool>,
+}
+
+struct Pool {
     config: postgres::Config,
     max: usize,
     wait: Duration,
@@ -77,26 +81,30 @@ impl Postgres {
             config.connect_timeout(Duration::from_secs(5));
         }
         Self {
-            config,
-            max: max.max(1),
-            wait: Duration::from_secs(5),
-            state: Mutex::new(State {
-                idle: Vec::new(),
-                open: 0,
+            pool: Arc::new(Pool {
+                config,
+                max: max.max(1),
+                wait: Duration::from_secs(5),
+                state: Mutex::new(State {
+                    idle: Vec::new(),
+                    open: 0,
+                }),
+                freed: Condvar::new(),
             }),
-            freed: Condvar::new(),
         }
     }
 
     /// Runs SQL that isn't the app's, as the app's role: setting up a test, for instance.
     /// Several statements, separated by `;`, without parameters.
     pub fn batch(&self, sql: &str) -> Result<(), DbError> {
-        let mut conn = self.take()?;
+        let mut conn = self.pool.take()?;
         let result = conn.client.batch_execute(sql).map_err(db_error);
-        self.give_back(conn);
+        self.pool.give_back(conn);
         result
     }
+}
 
+impl Pool {
     fn take(&self) -> Result<Connection, DbError> {
         let deadline = Instant::now() + self.wait;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -170,34 +178,35 @@ impl Database for Postgres {
         sql: &str,
         params: &[Value],
     ) -> Result<Rows, DbError> {
-        let mut conn = self.take()?;
-        let result = if settings.is_empty() {
-            run(&mut conn, sql, params)
-        } else {
-            run_with_settings(&mut conn, settings, sql, params)
-        };
-        self.give_back(conn);
-        result
-    }
-}
-
-/// The query in a transaction with these settings, which end with it.
-fn run_with_settings(
-    conn: &mut Connection,
-    settings: &[(String, String)],
-    sql: &str,
-    params: &[Value],
-) -> Result<Rows, DbError> {
-    for (name, _) in settings {
-        if !name.starts_with("punk.") {
-            return Err(DbError::new(
-                "42602",
-                format!("the setting {name:?} isn't one of punk's"),
-            ));
+        if settings.is_empty() {
+            let mut conn = self.pool.take()?;
+            let result = run(&mut conn, sql, params);
+            self.pool.give_back(conn);
+            return result;
         }
+        let mut tx = self.begin(settings)?;
+        let rows = tx.run(sql, params)?;
+        tx.commit()?;
+        Ok(rows)
     }
-    conn.client.batch_execute("BEGIN").map_err(db_error)?;
-    let result = (|| {
+
+    fn begin(&self, settings: &[(String, String)]) -> Result<Box<dyn Transaction>, DbError> {
+        for (name, _) in settings {
+            if !name.starts_with("punk.") {
+                return Err(DbError::new(
+                    "42602",
+                    format!("the setting {name:?} isn't one of punk's"),
+                ));
+            }
+        }
+        let conn = self.pool.take()?;
+        // From here on the transaction gives the connection back, also when it fails.
+        let mut tx = PgTransaction {
+            pool: Arc::clone(&self.pool),
+            conn: Some(conn),
+        };
+        let conn = tx.conn.as_mut().expect("just set");
+        conn.client.batch_execute("BEGIN").map_err(db_error)?;
         for (name, value) in settings {
             conn.client
                 .execute(
@@ -206,15 +215,52 @@ fn run_with_settings(
                 )
                 .map_err(db_error)?;
         }
-        let rows = run(conn, sql, params)?;
-        conn.client.batch_execute("COMMIT").map_err(db_error)?;
-        Ok(rows)
-    })();
-    if result.is_err() && !conn.client.is_closed() {
-        // A failed ROLLBACK leaves the connection broken: it is dropped when given back.
-        let _ = conn.client.batch_execute("ROLLBACK");
+        Ok(Box::new(tx))
     }
-    result
+}
+
+/// A transaction on a connection of the pool, with the settings it began with, which end with
+/// it. Dropped without a commit, it rolls back; either way the connection goes back to the pool.
+struct PgTransaction {
+    pool: Arc<Pool>,
+    conn: Option<Connection>,
+}
+
+impl Transaction for PgTransaction {
+    fn run(&mut self, sql: &str, params: &[Value]) -> Result<Rows, DbError> {
+        match self.conn.as_mut() {
+            Some(conn) => run(conn, sql, params),
+            None => Err(DbError::new("25000", "the transaction has ended")),
+        }
+    }
+
+    fn commit(mut self: Box<Self>) -> Result<(), DbError> {
+        let Some(mut conn) = self.conn.take() else {
+            return Err(DbError::new("25000", "the transaction has ended"));
+        };
+        let result = conn.client.batch_execute("COMMIT").map_err(db_error);
+        if result.is_err() && !conn.client.is_closed() {
+            let _ = conn.client.batch_execute("ROLLBACK");
+        }
+        self.pool.give_back(conn);
+        result
+    }
+}
+
+impl Drop for PgTransaction {
+    fn drop(&mut self) {
+        if let Some(mut conn) = self.conn.take() {
+            if !conn.client.is_closed() {
+                // A failed ROLLBACK leaves the connection broken: it is dropped when given back.
+                if conn.client.batch_execute("ROLLBACK").is_err() {
+                    drop(conn);
+                    self.pool.closed();
+                    return;
+                }
+            }
+            self.pool.give_back(conn);
+        }
+    }
 }
 
 /// A new connection, if its role keeps to row-level security: a superuser and a role with
@@ -453,9 +499,9 @@ fn quote_ident(name: &str) -> String {
 /// a host is a name.
 impl Grants for Postgres {
     fn grants(&self) -> Vec<Grant> {
-        let ports = self.config.get_ports();
+        let ports = self.pool.config.get_ports();
         let mut grants = Vec::new();
-        for (i, host) in self.config.get_hosts().iter().enumerate() {
+        for (i, host) in self.pool.config.get_hosts().iter().enumerate() {
             let port = ports.get(i).or(ports.first()).copied().unwrap_or(5432);
             if let Host::Tcp(name) = host {
                 grants.push(Grant::Connect(port));

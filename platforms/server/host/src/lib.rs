@@ -10,11 +10,11 @@
 //! capabilities the app gets: the real ones in its `main`, the deterministic ones of
 //! `ambit-server-sim` in its tests.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::UNIX_EPOCH;
 
 mod database;
-pub use database::{Database, DbError, Rows, Value};
+pub use database::{Database, DbError, Rows, Transaction, Value};
 
 use ambit_caps::{Clock, Kv, Random};
 use ambit_server::http::{HeaderName, HeaderValue, StatusCode, header};
@@ -60,6 +60,32 @@ pub struct RocRun {
     error_message: RocStr,
     rows: RocList<RocList<RocCell>>,
     ok: bool,
+}
+
+/// What `Postgres.begin_host!`, `commit_host!` and `rollback_host!` give: `{ code : Str,
+/// message : Str }`, an empty code when it went well.
+#[repr(C)]
+pub struct RocDone {
+    code: RocStr,
+    message: RocStr,
+}
+
+impl RocDone {
+    fn of(result: Result<(), DbError>) -> Self {
+        match result {
+            Ok(()) => Self {
+                code: RocStr::empty(),
+                message: RocStr::empty(),
+            },
+            Err(e) => {
+                tracing::warn!(code = e.code.as_str(), "transaction failed: {}", e.message);
+                Self {
+                    code: RocStr::new(&e.code),
+                    message: RocStr::new(&e.message),
+                }
+            }
+        }
+    }
 }
 
 unsafe extern "C" {
@@ -191,10 +217,24 @@ thread_local! {
     static CURRENT: Cell<*const App> = const { Cell::new(std::ptr::null()) };
 }
 
+thread_local! {
+    /// The transaction of `Db.transaction!` that is open on this thread, with its settings.
+    static OPEN: RefCell<Option<Open>> = const { RefCell::new(None) };
+}
+
+struct Open {
+    settings: Vec<(String, String)>,
+    transaction: Box<dyn Transaction>,
+}
+
 fn with_app<R>(app: &App, f: impl FnOnce() -> R) -> R {
     struct Reset(*const App);
     impl Drop for Reset {
         fn drop(&mut self) {
+            // A transaction doesn't outlive its request: one the app left open rolls back.
+            if OPEN.with(|o| o.borrow_mut().take()).is_some() {
+                tracing::warn!("the app left a transaction open: it was rolled back");
+            }
             CURRENT.with(|c| c.set(self.0));
         }
     }
@@ -380,7 +420,14 @@ pub extern "C" fn roc_pg_run(
             }
         }
     }
-    let result = app(|app| app.database.run_as(&settings, sql.as_str(), &values));
+    let result = OPEN.with(|open| match open.borrow_mut().as_mut() {
+        None => app(|app| app.database.run_as(&settings, sql.as_str(), &values)),
+        Some(open) if open.settings == settings => open.transaction.run(sql.as_str(), &values),
+        Some(_) => Err(DbError::new(
+            "25000",
+            "a query in a transaction runs as the user of the transaction",
+        )),
+    });
     match result {
         Ok(rows) => RocRun {
             affected: rows.affected,
@@ -412,6 +459,53 @@ pub extern "C" fn roc_pg_run(
             run_failed(&e)
         }
     }
+}
+
+/// `Postgres.begin_host!`: begins the transaction of `Db.transaction!` or `Db.transactionAs!`,
+/// with these settings. The queries of the app run in it until it ends. Transactions don't nest.
+#[unsafe(no_mangle)]
+pub extern "C" fn roc_pg_begin(settings: RocList<RocPair>) -> RocDone {
+    let settings: Vec<(String, String)> = settings
+        .as_slice()
+        .iter()
+        .map(|s| (s.first.as_str().to_owned(), s.second.as_str().to_owned()))
+        .collect();
+    RocDone::of(OPEN.with(|open| {
+        let mut open = open.borrow_mut();
+        if open.is_some() {
+            return Err(DbError::new(
+                "25001",
+                "a transaction is open already: transactions don't nest",
+            ));
+        }
+        let transaction = app(|app| app.database.begin(&settings))?;
+        *open = Some(Open {
+            settings,
+            transaction,
+        });
+        Ok(())
+    }))
+}
+
+/// `Postgres.commit_host!`: ends the open transaction, its changes hold.
+#[unsafe(no_mangle)]
+pub extern "C" fn roc_pg_commit() -> RocDone {
+    RocDone::of(match OPEN.with(|open| open.borrow_mut().take()) {
+        Some(open) => open.transaction.commit(),
+        None => Err(DbError::new("25000", "no transaction is open")),
+    })
+}
+
+/// `Postgres.rollback_host!`: ends the open transaction, its changes go.
+#[unsafe(no_mangle)]
+pub extern "C" fn roc_pg_rollback() -> RocDone {
+    RocDone::of(match OPEN.with(|open| open.borrow_mut().take()) {
+        Some(open) => {
+            drop(open);
+            Ok(())
+        }
+        None => Err(DbError::new("25000", "no transaction is open")),
+    })
 }
 
 fn run_failed(e: &DbError) -> RocRun {

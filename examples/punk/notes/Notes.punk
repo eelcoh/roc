@@ -13,8 +13,12 @@ as the user of the request (`Db.runAs!`).
 - `POST /notes` with the text as body: makes a note of the user, 201 with its id.
 - `GET /notes`: the notes the user may read, one per line: `id public body`.
 - `POST /notes/<id>/publish`: makes the note public, 404 if it isn't the user's.
-- `POST /notes/<id>/pin`: pins the note, 404 if it isn't the user's.
+- `POST /notes/<id>/pin`: pins the note and unpins the user's others, 404 if
+  it isn't the user's (and then the others keep their pin).
 - `DELETE /notes/<id>`: removes the note, 404 if it isn't the user's or is pinned.
+- `PUT /me` with a name as body: the name of the user, 201 the first time.
+- `GET /public`: the public notes of the users with a name, by name and then
+  by text, one per line: `name: body`.
 
 The user comes from the header `x-user`, which a proxy in front of the app
 sets once it has signed the user in. Without it the user is nobody, who only
@@ -42,6 +46,19 @@ table notes : Note
 -- Its migration was `fn old -> { old | body = old.text, pinned = False }`;
 -- once schema.sql has a version, the migrate that made it goes.
 
+type alias Person =
+    { id : Str
+    , name : Str
+    }
+
+-- The names of the users: everyone reads them, each user writes their own.
+table people : Person
+    key id
+    read everyone
+    insert fn user, person -> person.id == user.id
+    update fn user, person -> person.id == user.id
+    delete nobody
+
 type alias User =
     { id : Str
     }
@@ -62,6 +79,32 @@ pin = fn id ->
     notes
         |> Db.filter (fn note -> note.id == id)
         |> Db.update (fn note -> { note | pinned = True })
+
+-- The pins of the user's notes go: `pinOnly!` runs it before `pin`.
+unpinAll : Str -> Db.Query Int
+unpinAll = fn owner ->
+    notes
+        |> Db.filter (fn note -> note.owner == owner && note.pinned)
+        |> Db.update (fn note -> { note | pinned = False })
+
+rename : Str -> Str -> Db.Query Int
+rename = fn id, newName ->
+    people
+        |> Db.filter (fn person -> person.id == id)
+        |> Db.update (fn person -> { person | name = newName })
+
+-- The public notes with the names of who wrote them, by name and then by
+-- text, at most 20: a join, still one SQL statement.
+publicNotes : Db.Query (List { name : Str, body : Str })
+publicNotes =
+    notes
+        |> Db.join people (fn note, person -> note.owner == person.id)
+        |> Db.filter (fn note, _ -> note.public)
+        |> Db.sortBy (fn note, _ -> note.body)
+        |> Db.sortBy (fn _, person -> person.name)
+        |> Db.take 20
+        |> Db.map (fn note, person -> { name = person.name, body = note.body })
+        |> Db.all
 
 remove : Str -> Db.Query Int
 remove = fn id ->
@@ -84,6 +127,8 @@ handle! = fn req ->
         Err (RowErr problem) ->
             Log.error! "a stored note doesn't fit: ${problem}"
             text 500 "internal error\n"
+        Err NotFound ->
+            text 404 "not found\n"
 
 route! : User -> Request => Result Response _
 route! = fn user, req ->
@@ -91,8 +136,10 @@ route! = fn user, req ->
         ("POST", ["", "notes"]) -> add! user req.body
         ("GET", ["", "notes"]) -> list! user
         ("POST", ["", "notes", id, "publish"]) -> changed (try Db.runAs! user (publish id))
-        ("POST", ["", "notes", id, "pin"]) -> changed (try Db.runAs! user (pin id))
+        ("POST", ["", "notes", id, "pin"]) -> Db.transactionAs! user (fn _ -> pinOnly! user id)
         ("DELETE", ["", "notes", id]) -> changed (try Db.runAs! user (remove id))
+        ("PUT", ["", "me"]) -> setName! user req.body
+        ("GET", ["", "public"]) -> listPublic! user
         _ -> Ok (text 404 "not found\n")
 
 add! : User -> List U8 => Result Response _
@@ -111,6 +158,43 @@ list! = fn user ->
     lines =
         found
             |> List.map (fn note -> "${note.id} ${if note.public then "public" else "private"} ${note.body}\n")
+            |> Str.joinWith ""
+    Ok (text 200 lines)
+
+-- One pinned note per user. Both changes are in one transaction: when the
+-- note isn't there, `Err NotFound` rolls back the unpinning too.
+pinOnly! : User -> Str => Result Response _
+pinOnly! = fn user, id ->
+    _ = try Db.runAs! user (unpinAll user.id)
+    count = try Db.runAs! user (pin id)
+    if count == 0 then
+        Err NotFound
+    else
+        Ok (text 200 "ok\n")
+
+setName! : User -> List U8 => Result Response _
+setName! = fn user, body ->
+    case Str.fromUtf8 body of
+        Err _ -> Ok (text 400 "a name is text\n")
+        Ok newName -> Db.transactionAs! user (fn _ -> saveName! user newName)
+
+-- A new name, or a change of the name, in one transaction. Two requests at
+-- once can still both find no name: then the second insert fails on the key.
+saveName! : User -> Str => Result Response _
+saveName! = fn user, newName ->
+    count = try Db.runAs! user (rename user.id newName)
+    if count == 0 then
+        _ = try Db.runAs! user (Db.insert { id = user.id, name = newName } people)
+        Ok (text 201 "ok\n")
+    else
+        Ok (text 200 "ok\n")
+
+listPublic! : User => Result Response _
+listPublic! = fn user ->
+    found = try Db.runAs! user publicNotes
+    lines =
+        found
+            |> List.map (fn note -> "${note.name}: ${note.body}\n")
             |> Str.joinWith ""
     Ok (text 200 lines)
 

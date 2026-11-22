@@ -43,6 +43,39 @@ Db := [].{
         }
     }
 
+    ## Runs the function in one transaction, as nobody: its queries see each
+    ## other's changes, and the rest of the world sees them all once it gives
+    ## `Ok`, or none of them when it gives `Err`. In punk
+    ## `Db.transaction! (fn _ -> ...)`.
+    transaction! : ({} => Try(a, [PgErr({ code : Str, message : Str }), ..e])) => Try(a, [PgErr({ code : Str, message : Str }), ..e])
+    transaction! = |f| transaction_as!([], f)
+
+    ## What punk writes for `Db.transactionAs! user (fn _ -> ...)`: the same,
+    ## with the fields of the user as settings of the transaction. The
+    ## queries in it run as that user (`Db.runAs! user`).
+    transaction_as! : List((Str, Str)), ({} => Try(a, [PgErr({ code : Str, message : Str }), ..e])) => Try(a, [PgErr({ code : Str, message : Str }), ..e])
+    transaction_as! = |settings, f| {
+        begun = Postgres.begin_host!(settings)
+        if begun.code != "" {
+            Err(PgErr({ code: begun.code, message: begun.message }))
+        } else {
+            match f({}) {
+                Ok(value) => {
+                    committed = Postgres.commit_host!()
+                    if committed.code == "" {
+                        Ok(value)
+                    } else {
+                        Err(PgErr({ code: committed.code, message: committed.message }))
+                    }
+                }
+                Err(problem) => {
+                    _ = Postgres.rollback_host!()
+                    Err(problem)
+                }
+            }
+        }
+    }
+
     ## The SQL punk made for the query, for a log line or a test.
     to_sql : Query(a) -> Str
     to_sql = |query| Sql.to_sql(query.sql)
