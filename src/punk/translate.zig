@@ -1960,6 +1960,11 @@ pub const Emitter = struct {
     /// `Db.query` after `import pf.Sql as Db`, `query` when it is exposed):
     /// its SQL has to be written in the program (rule P301).
     sql_query_names: std.ArrayList([]const u8) = .empty,
+    /// The names that mean a function of the platform's `Mongo`, `Filter`
+    /// or `Update` whose first argument names a collection or a field
+    /// (`Mongo.collection`, `Filter.equals`, `equals` when it is exposed):
+    /// that name has to be written in the program (rule P302).
+    mongo_names: std.ArrayList(MongoName) = .empty,
     /// The name the file uses for the platform's `Db` module, whose
     /// `Db.filter`, `Db.all`, ... make the queries of query.zig.
     db_alias: ?[]const u8 = null,
@@ -1967,6 +1972,28 @@ pub const Emitter = struct {
     tables: std.StringHashMapUnmanaged(*query.Table) = .empty,
     /// The fields of the user that the tables' policies look at (query.zig).
     db_user: std.ArrayListUnmanaged(query.UserField) = .empty,
+
+    const MongoName = struct { name: []const u8, what: enum { collection, field } };
+
+    /// The functions of P302, by module: each takes the name of a collection
+    /// or a field first.
+    const mongo_functions = [_]struct { module: []const u8, member: []const u8 }{
+        .{ .module = "Mongo", .member = "collection" },
+        .{ .module = "Mongo", .member = "sortBy" },
+        .{ .module = "Mongo", .member = "sortByDescending" },
+        .{ .module = "Filter", .member = "equals" },
+        .{ .module = "Filter", .member = "notEquals" },
+        .{ .module = "Filter", .member = "lessThan" },
+        .{ .module = "Filter", .member = "atMost" },
+        .{ .module = "Filter", .member = "greaterThan" },
+        .{ .module = "Filter", .member = "atLeast" },
+        .{ .module = "Filter", .member = "oneOf" },
+        .{ .module = "Filter", .member = "exists" },
+        .{ .module = "Filter", .member = "missing" },
+        .{ .module = "Update", .member = "set" },
+        .{ .module = "Update", .member = "unset" },
+        .{ .module = "Update", .member = "increment" },
+    };
 
     /// `order` is not `.none` for names imported unqualified from a Roc
     /// module (`import Json exposing [decode]`).
@@ -2677,6 +2704,13 @@ pub const Emitter = struct {
             if (item.kind != .raw) continue;
             const imp = parseImport(item.kind.raw) orelse continue;
             if (imp.package != null and std.mem.eql(u8, imp.module, "Db")) e.db_alias = imp.alias;
+            if (imp.package != null) for (mongo_functions) |f| if (std.mem.eql(u8, imp.module, f.module)) {
+                const what: @FieldType(MongoName, "what") = if (std.mem.eql(u8, f.member, "collection")) .collection else .field;
+                try e.mongo_names.append(e.a, .{ .name = try std.fmt.allocPrint(e.a, "{s}.{s}", .{ imp.alias, f.member }), .what = what });
+                const list = imp.exposing orelse continue;
+                var names = std.mem.tokenizeAny(u8, list, ", \t\r\n");
+                while (names.next()) |n| if (std.mem.eql(u8, n, f.member)) try e.mongo_names.append(e.a, .{ .name = f.member, .what = what });
+            };
             if (imp.package == null or !std.mem.eql(u8, imp.module, "Sql")) continue;
             try e.sql_query_names.append(e.a, try std.fmt.allocPrint(e.a, "{s}.query", .{imp.alias}));
             const list = imp.exposing orelse continue;
@@ -2688,6 +2722,43 @@ pub const Emitter = struct {
     fn isSqlQuery(e: *Emitter, name: []const u8) bool {
         for (e.sql_query_names.items) |n| if (std.mem.eql(u8, n, name)) return true;
         return false;
+    }
+
+    fn mongoName(e: *Emitter, name: []const u8) ?MongoName {
+        for (e.mongo_names.items) |n| if (std.mem.eql(u8, n.name, name)) return n;
+        return null;
+    }
+
+    /// Rule P302: the name of a Mongo collection or field is text in the
+    /// program, as the SQL of P301: a request can't choose which collection
+    /// a query reads or which field it compares, and a name can't be one of
+    /// Mongo's operators (`$where`, `$ne`). Values are always `Bson` values.
+    fn checkMongoName(e: *Emitter, at: []const u8, m: MongoName, args: []*Expr) Error!void {
+        const kind = if (m.what == .collection) "collection" else "field";
+        const example = if (m.what == .collection) "Mongo.collection \"links\"" else "Filter.equals \"url\" (Bson.text url)";
+        if (args.len > 0) {
+            var arg = args[0];
+            while (arg.* == .paren) arg = arg.paren;
+            if (arg.* == .string) {
+                const quoted = arg.string;
+                // The literal as written, with its quotes.
+                const text = if (quoted.len >= 2 and quoted[0] == '"' and quoted[quoted.len - 1] == '"') quoted[1 .. quoted.len - 1] else quoted;
+                const bad_text = std.mem.find(u8, text, "${") != null or std.mem.findScalar(u8, text, '\\') != null;
+                const bad_name = switch (m.what) {
+                    .collection => text.len == 0 or std.mem.findScalar(u8, text, '$') != null or std.mem.startsWith(u8, text, "system."),
+                    .field => blk: {
+                        if (text.len == 0) break :blk true;
+                        var keys = std.mem.splitScalar(u8, text, '.');
+                        while (keys.next()) |key| if (key.len == 0 or key[0] == '$') break :blk true;
+                        break :blk false;
+                    },
+                };
+                if (!bad_text and !bad_name) return;
+                if (bad_text) return e.errAtRule(quoted, .mongo_name_not_literal, try std.fmt.allocPrint(e.a, "the {s} name of '{s}' can't contain '${{...}}' or escapes: write the name itself, as in {s}", .{ kind, m.name, example }));
+                return e.errAtRule(quoted, .mongo_name_not_literal, try std.fmt.allocPrint(e.a, "\"{s}\" is not a {s} name: it can't be empty{s}, and can't start with '$' (Mongo would read it as an operator)", .{ text, kind, if (m.what == .collection) " or start with 'system.'" else " or have an empty part between dots" }));
+            }
+        }
+        return e.errAtRule(at, .mongo_name_not_literal, try std.fmt.allocPrint(e.a, "'{s}' takes the {s} name as text written right here, as in {s}: a name made while the program runs could be chosen by a request. Only values can change, as Bson values.", .{ m.name, kind, example }));
     }
 
     /// Rule P301: the SQL of a query is text in the program, never text made
@@ -2915,6 +2986,7 @@ pub const Emitter = struct {
         const args = call.args;
         const f_ident = if (func.* == .paren and func.paren.* == .ident) func.paren else func;
         if (f_ident.* == .ident and e.isSqlQuery(f_ident.ident)) try e.checkSqlLiteral(f_ident.ident, args);
+        if (f_ident.* == .ident) if (e.mongoName(f_ident.ident)) |m| try e.checkMongoName(f_ident.ident, m, args);
         if (f_ident.* == .ident) if (query.member(e, f_ident.ident)) |m| return query.emit(e, f_ident.ident, m, args);
         if (f_ident.* == .ident) if (try e.helperFor(f_ident.ident)) |h| if (h.tmpl) |tmpl| if (args.len == h.arity) {
             try e.markAt(f_ident.ident, 0);
@@ -3130,6 +3202,7 @@ pub const Emitter = struct {
             .ident => |name| {
                 // `Sql.query` as a value would let SQL in that isn't in the program.
                 if (e.isSqlQuery(name)) try e.checkSqlLiteral(name, &.{});
+                if (e.mongoName(name)) |m| try e.checkMongoName(name, m, &.{});
                 if (query.member(e, name) != null) return query.notInPipeline(e, name);
                 if (e.tables.contains(name)) return query.tableAsValue(e, name);
                 // A builtin whose arguments punkroc reorders, used as a value

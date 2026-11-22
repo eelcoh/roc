@@ -2,7 +2,7 @@ platform ""
     requires {
         handle! : Http.Request => Http.Response
     }
-    exposes [Http, Clock, Random, Kv, Config, Log, Postgres, Sql, Row, Db]
+    exposes [Http, Clock, Random, Kv, Config, Log, Postgres, Sql, Row, Db, Mongo, Bson, Doc, Filter, Update]
     packages {}
     provides { "roc_handle": handle_for_host! }
     hosted {
@@ -14,6 +14,7 @@ platform ""
         "roc_log_error": Log.error!,
         "roc_log_info": Log.info!,
         "roc_log_warn": Log.warn!,
+        "roc_mongo_run": Mongo.run_host!,
         "roc_pg_begin": Postgres.begin_host!,
         "roc_pg_commit": Postgres.commit_host!,
         "roc_pg_rollback": Postgres.rollback_host!,
@@ -37,6 +38,11 @@ import Config
 import Db
 import Kv
 import Log
+import Mongo
+import Bson
+import Doc
+import Filter
+import Update
 import Postgres
 import Random
 import Row

@@ -15,6 +15,8 @@ use std::time::UNIX_EPOCH;
 
 mod database;
 pub use database::{Database, DbError, Rows, Transaction, Value};
+pub mod documents;
+pub use documents::{Change, Comparison, Doc, Documents, Filter, Order, Search};
 
 use ambit_caps::{Clock, Kv, Random};
 use ambit_server::http::{HeaderName, HeaderValue, StatusCode, header};
@@ -62,6 +64,32 @@ pub struct RocRun {
     ok: bool,
 }
 
+/// `Bson.Node`: `{ kind : U8, name : Str, size : U64, text : Str }`. Roc puts the `U64` before
+/// the `Str`s (of the same alignment, plain values come first) and the `U8` last.
+#[repr(C)]
+pub struct RocNode {
+    size: u64,
+    name: RocStr,
+    text: RocStr,
+    kind: u8,
+}
+
+// SAFETY: it holds two `Str`s.
+unsafe impl punk_roc_abi::Element for RocNode {
+    const REFCOUNTED: bool = true;
+}
+
+/// What `Mongo.run_host!` gives: the fields of the same alignment in alphabetical order, the
+/// `Bool` last.
+#[repr(C)]
+pub struct RocMongo {
+    count: u64,
+    documents: RocList<RocList<RocNode>>,
+    error_code: RocStr,
+    error_message: RocStr,
+    ok: bool,
+}
+
 /// What `Postgres.begin_host!`, `commit_host!` and `rollback_host!` give: `{ code : Str,
 /// message : Str }`, an empty code when it went well.
 #[repr(C)]
@@ -105,6 +133,7 @@ pub struct App {
     random: Box<dyn Random>,
     kv: Box<dyn Kv>,
     database: Box<dyn Database>,
+    documents: Box<dyn Documents>,
     config: String,
 }
 
@@ -122,6 +151,7 @@ impl App {
             random: Box::new(random),
             kv: Box::new(kv),
             database: Box::new(database::NoDatabase),
+            documents: Box::new(documents::NoDocuments),
             config: config.into(),
         }
     }
@@ -130,6 +160,13 @@ impl App {
     /// fails with `PgErr { code = "08000", .. }`.
     pub fn with_database(mut self, database: impl Database) -> Self {
         self.database = Box::new(database);
+        self
+    }
+
+    /// The app, with the document database its `Mongo` operations run on. Without one, every
+    /// operation fails with `MongoErr { code = "6", .. }`.
+    pub fn with_documents(mut self, documents: impl Documents) -> Self {
+        self.documents = Box::new(documents);
         self
     }
 }
@@ -516,5 +553,132 @@ fn run_failed(e: &DbError) -> RocRun {
         error_message: RocStr::new(&e.message),
         rows: RocList::empty(),
         ok: false,
+    }
+}
+
+// --- Mongo --------------------------------------------------------------------------------------
+
+fn nodes_of(list: &RocList<RocNode>) -> Vec<documents::Node> {
+    list.as_slice()
+        .iter()
+        .map(|n| documents::Node {
+            kind: n.kind,
+            name: n.name.as_str().to_owned(),
+            size: n.size,
+            text: n.text.as_str().to_owned(),
+        })
+        .collect()
+}
+
+fn roc_nodes(value: &Doc) -> RocList<RocNode> {
+    let mut nodes = Vec::new();
+    documents::value_to_nodes(value, "", &mut nodes);
+    RocList::from_vec(
+        nodes
+            .into_iter()
+            .map(|n| RocNode {
+                size: n.size,
+                name: RocStr::new(&n.name),
+                text: RocStr::new(&n.text),
+                kind: n.kind,
+            })
+            .collect(),
+    )
+}
+
+/// What a Mongo operation gave: the documents it found, or how many it counted or changed.
+enum MongoDone {
+    Found(Vec<Doc>),
+    Counted(u64),
+}
+
+/// `Mongo.run_host!`: one operation on the app's document database. `op` is 1 find, 2 count,
+/// 3 insert, 4 insert if new, 5 update, 6 delete; the arguments come in the order of
+/// `Mongo.roc`.
+#[unsafe(no_mangle)]
+pub extern "C" fn roc_mongo_run(
+    op: u8,
+    collection: RocStr,
+    filter: RocList<RocNode>,
+    document: RocList<RocNode>,
+    sort: RocList<RocNode>,
+    skip: u64,
+    limit: u64,
+) -> RocMongo {
+    let collection = collection.as_str();
+    let filter = nodes_of(&filter);
+    let document = nodes_of(&document);
+    let sort = nodes_of(&sort);
+    let result = documents::check_collection(collection).and_then(|()| {
+        app(|app| {
+            let store = &app.documents;
+            let search = || -> Result<Search, DbError> {
+                Ok(Search {
+                    filter: documents::filter_from_nodes(&filter)?,
+                    sort: documents::sort_from_nodes(&sort)?,
+                    skip,
+                    limit: if limit == 0 { None } else { Some(limit) },
+                })
+            };
+            let object = || -> Result<Doc, DbError> {
+                match documents::value_from_nodes(&document)? {
+                    object @ Doc::Object(_) => Ok(object),
+                    _ => Err(DbError::new("2", "a document is an object")),
+                }
+            };
+            match op {
+                1 => store.find(collection, &search()?).map(MongoDone::Found),
+                2 => store.count(collection, &search()?).map(MongoDone::Counted),
+                3 => store
+                    .insert(collection, &object()?)
+                    .map(|()| MongoDone::Counted(1)),
+                4 => match store.insert(collection, &object()?) {
+                    Ok(()) => Ok(MongoDone::Counted(1)),
+                    Err(e) if e.code == "11000" => Ok(MongoDone::Counted(0)),
+                    Err(e) => Err(e),
+                },
+                5 => store
+                    .update(
+                        collection,
+                        &documents::filter_from_nodes(&filter)?,
+                        &documents::changes_from_nodes(&document)?,
+                    )
+                    .map(MongoDone::Counted),
+                6 => store
+                    .delete(collection, &documents::filter_from_nodes(&filter)?)
+                    .map(MongoDone::Counted),
+                other => Err(DbError::new("2", format!("no operation {other}"))),
+            }
+        })
+    });
+    match result {
+        Ok(MongoDone::Found(found)) => RocMongo {
+            count: found.len() as u64,
+            documents: RocList::from_vec(found.iter().map(roc_nodes).collect()),
+            error_code: RocStr::empty(),
+            error_message: RocStr::empty(),
+            ok: true,
+        },
+        Ok(MongoDone::Counted(count)) => RocMongo {
+            count,
+            documents: RocList::empty(),
+            error_code: RocStr::empty(),
+            error_message: RocStr::empty(),
+            ok: true,
+        },
+        Err(e) => {
+            tracing::warn!(
+                code = e.code.as_str(),
+                "mongo operation failed: {}",
+                e.message
+            );
+            RocMongo {
+                count: 0,
+                documents: RocList::empty(),
+                error_code: RocStr::new(&e.code),
+                error_message: RocStr::new(&e.message),
+                ok: false,
+            }
+        }
     }
 }

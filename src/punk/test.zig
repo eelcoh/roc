@@ -1124,6 +1124,24 @@ test "rules: the SQL of Sql.query is text in the program" {
     try translateOk("app [main!] { pf: platform \"p.roc\" }\n\nimport Sql\n\nq = fn s -> Sql.query s []\n");
 }
 
+test "rules: Mongo collection and field names are text in the program" {
+    const head = "app [main!] { Platform: platform \"p.roc\" }\n\nimport Platform.Mongo\nimport Platform.Filter\nimport Platform.Update\nimport Platform.Bson\n\n";
+    // Names written in the program, also in a pipe or dotted: fine.
+    try translateOk(head ++ "links = Mongo.collection \"links\"\n");
+    try translateOk(head ++ "f = fn id -> Filter.equals \"_id\" (Bson.text id)\n");
+    try translateOk(head ++ "f = fn q -> q |> Mongo.sortBy \"address.city\"\n");
+    try translateOk(head ++ "u = fn v -> [ Update.set \"url\" (Bson.text v), Update.unset \"old\" ]\n");
+    // A name made while the program runs, or one Mongo would read as an operator: P302.
+    try checkRule(head ++ "links = fn name -> Mongo.collection name\n", 8, 20, .mongo_name_not_literal);
+    try checkRule(head ++ "f = fn field, v -> Filter.equals field v\n", 8, 20, .mongo_name_not_literal);
+    try checkRule(head ++ "f = fn v -> Filter.equals \"$where\" v\n", 8, 27, .mongo_name_not_literal);
+    try checkRule(head ++ "f = fn v -> Filter.equals \"a.$gt\" v\n", 8, 27, .mongo_name_not_literal);
+    try checkRule(head ++ "f = fn t, v -> Update.set \"${t}\" v\n", 8, 27, .mongo_name_not_literal);
+    try checkRule(head ++ "c = Mongo.collection \"system.users\"\n", 8, 22, .mongo_name_not_literal);
+    try checkRule(head ++ "fs = List.map Filter.missing [ \"a\" ]\n", 8, 15, .mongo_name_not_literal);
+    try checkRule("app [main!] { Platform: platform \"p.roc\" }\n\nimport Platform.Filter exposing [equals]\n\nf = fn n, v -> equals n v\n", 5, 16, .mongo_name_not_literal);
+}
+
 test "rules: what a module exposes has a type annotation" {
     try checkRule("module M exposing (double)\n\ndouble = fn x -> x * 2\n", 3, 1, .exposed_without_annotation);
     try checkError("module M exposing (..)\n\nf : I64 -> I64\nf = fn x -> x\n\ng = fn x -> x\n", 6, "'g' is exposed, so it needs a type annotation");

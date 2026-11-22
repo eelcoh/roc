@@ -6,10 +6,10 @@ ambit owns the listener, the threads and the limits (body size, timeouts, a
 full queue answers 503), and calls the punk app once per request.
 
 ```
-app [handle!] { pf: platform "../../../platforms/server/main.roc", json: "../../../packages/json/main.roc" }
+app [handle!] { Platform: platform "../../../platforms/server/main.roc", Json: "../../../packages/json/main.roc" }
 
-import pf.Http exposing [Request, Response]
-import pf.Kv
+import Platform.Http exposing [Request, Response]
+import Platform.Kv
 
 handle! : Request => Response
 handle! = fn req ->
@@ -30,9 +30,15 @@ handle! = fn req ->
 | `Sql` | `query : Str -> List Sql.Param -> Sql.Query` (the SQL is a literal, rule P301), parameters `text`, `int`, `float`, `bool`, `null`, `nullable` |
 | `Db` | the query language: `table` declarations and pipelines (`links \|> Db.filter f \|> Db.first`), `run! : Db.Query a => Result a _`, `toSql` |
 | `Row` | decoders as Elm's `Json.Decode`: `field "url" Row.text`, columns `int`, `float`, `text`, `bool`, `nullable`; `map` to `map5`, `succeed`, `fail`, `andThen` |
+| `Mongo` | `collection "links"`, searches `find filter`, `sortBy`, `sortByDescending`, `drop`, `take`, run with `all! decoder`, `first! decoder`, `count!`; `insert! document`, `insertIfNew!`, `update! filter changes`, `delete! filter` |
+| `Bson` | values for documents, as Elm's `Json.Encode`: `text`, `int`, `float`, `bool`, `null`, `nullable`, `list`, `object [("url", Bson.text url)]`, `objectId`, `time` |
+| `Doc` | decoders for documents, as Elm's `Json.Decode`: `field "url" Doc.text`, `optionalField`, `int`, `float`, `text`, `bool`, `objectId`, `time`, `list`, `nullable`, `map` to `map5`, `andThen`, `oneOf`, `succeed`, `fail`, `decode` |
+| `Filter` | `equals`, `notEquals`, `lessThan`, `atMost`, `greaterThan`, `atLeast`, `oneOf`, `exists`, `missing` (each `"field" value`), `all [..]`, `any [..]`, `everything` |
+| `Update` | `set "field" value`, `unset "field"`, `increment "field" n` |
 
 The example app is ambit's link shortener: `examples/punk/shortener/`, and
-the same app with its links in Postgres: `examples/punk/shortener-postgres/`.
+the same app with its links in Postgres: `examples/punk/shortener-postgres/`,
+and in Mongo: `examples/punk/shortener-mongo/`.
 
 ## Postgres: tables and queries
 
@@ -216,10 +222,105 @@ recovers by itself when the database comes back. Each connection prepares a
 statement once and keeps it. `options=-c statement_timeout=5s` in the
 connection string limits how long a query may take.
 
+## Mongo
+
+Documents in collections, written and read as Elm writes and reads JSON:
+
+```
+import Platform.Mongo
+import Platform.Bson
+import Platform.Doc
+import Platform.Filter
+import Platform.Update
+
+links : Mongo.Collection
+links =
+    Mongo.collection "links"
+
+linkDecoder : Doc.Decoder Link
+linkDecoder =
+    Doc.map3 (fn id, url, created -> { id, url, created })
+        (Doc.field "_id" Doc.text)
+        (Doc.field "url" Doc.text)
+        (Doc.field "created" Doc.int)
+
+linkDocument : Link -> Bson.Value
+linkDocument = fn link ->
+    Bson.object
+        [ ("_id", Bson.text link.id)
+        , ("url", Bson.text link.url)
+        , ("created", Bson.int link.created)
+        ]
+
+recent! : Int => Result (List Link) _
+recent! = fn since ->
+    links
+        |> Mongo.find (Filter.atLeast "created" (Bson.int since))
+        |> Mongo.sortByDescending "created"
+        |> Mongo.take 20
+        |> Mongo.all! linkDecoder
+
+visit! : Str => Result Int _
+visit! = fn id ->
+    Mongo.update! (Filter.equals "_id" (Bson.text id)) [Update.increment "visits" 1] links
+```
+
+- **No query from text, no operator from a value.** A Mongo query is a
+  document in which keys like `$ne` and `$where` are operators, so a value
+  from a request that is an object (`{"$ne": ""}`) can turn a lookup into
+  "any document": the classic NoSQL injection. Here the app never writes a
+  query document. `Filter` and `Update` say what to compare and change, and
+  the host writes the operators (`$eq`, `$in`, `$set`, `$inc`, ...) itself,
+  with the value as data under `$eq`. A key that starts with `$` is refused
+  anywhere in a value (error "2"), and there is no `$where` or other
+  JavaScript.
+- **Names in the program.** The name of a collection (`Mongo.collection`)
+  and of a field (`Filter.*`, `Update.*`, `Mongo.sortBy`) is a string
+  literal, not empty and not starting with `$` (rule P302), as the SQL of
+  `Sql.query` is (P301): a request can't choose which collection a query
+  reads or which field it compares. `"address.city"` names a field of an
+  object in the document.
+- **Typed both ways.** A `Bson.Value` is made only by `Bson`'s functions; an
+  `Int` is stored as an int64, a `time` as Mongo's date. A decoder checks
+  each field it reads (int32 and int64 are both `Doc.int`), so a document
+  that doesn't fit is `DocErr "document 1: field \"created\": expected an
+  int, got text"`, not a wrong value. A missing field is an error, unless the
+  decoder says `Doc.optionalField`; a type punk doesn't read (a binary, a
+  decimal) is an error that says so.
+- **Errors are values.** `MongoErr { code, message }` has Mongo's error code
+  as text: "11000" is a duplicate key, "121" a document the collection's
+  validator refuses, "13" a collection the app may not use, "6" no server.
+  `Mongo.insertIfNew!` gives `False` instead of "11000". The shortener
+  answers 503 for a `MongoErr` and 500 for a `DocErr`.
+- **The collections are a capability.** The wiring says which collections
+  the app may read and which it may change; any other is "13", whatever the
+  database user may do. An app without a document database gets "6" for
+  everything.
+
+The database is the crate `mongo/` (`punk-server-mongo`, on the official
+driver), for the wiring on Linux and macOS:
+
+```rust
+use punk_server_mongo::{Access, Mongo};
+
+let mongo = Mongo::connect(&std::env::var("MONGO_URL")?, "shortener")?
+    .allow("links", Access::ReadWrite);               // and no other collection
+Lockdown::new().allow(&mongo) ...                     // its port (and the resolver for a name)
+let app = punk_server::App::new(clock, random, kv, config).with_documents(mongo);
+```
+
+The driver keeps a pool of connections and reconnects by itself; an
+operation that finds no server within 5 seconds is "6" (set
+`serverSelectionTimeoutMS` in the connection string for another limit).
+`Mongo::unique_index` makes a unique index for the wiring; `_id` always has
+one. Tests use `punk_server_mongo::testing::database` (a fresh database on
+`PUNK_TEST_MONGO`).
+
 ## What the app can do
 
 Only what the platform hands it, as in ambit: a clock, randomness, one
-key-value store, one database, its configuration and a log. There is no file, network,
+key-value store, one SQL database, one document database (the collections
+the wiring allows), its configuration and a log. There is no file, network,
 process or environment access in the API, so a punk server app can't reach
 anything else, whatever its code does. Which store, which clock and which
 configuration is up to the wiring, a few lines of Rust per app (like ambit's
@@ -318,6 +419,10 @@ shortener checks it too).
 - Times, UUIDs, JSON and `numeric` as their own types: convert them in the
   SQL for now.
 
+- Mongo: transactions (they need a replica set), aggregation pipelines
+  (grouping, `$lookup`), indexes declared in punk instead of the wiring,
+  Mongo on hermit (the driver needs tokio), and schema validators made
+  from the decoders.
 - `Kv.scan` (ambit has it): no app needed it yet.
 - A typed configuration instead of `Config.text!`: the platform would need a
   type variable for it, and the JSON decoder does the job.
