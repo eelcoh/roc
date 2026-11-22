@@ -64,6 +64,17 @@ Postgres := [].{
     ## statement wants and reads each column as text, int, float or bool. The
     ## settings (`("punk.user_id", "u1")`, from `Db.runAs!`) hold for the
     ## query's transaction only: the policies of the tables read them.
+    ## Begins the transaction of `Db.transaction!` and `Db.transactionAs!`,
+    ## with these settings: the queries run in it until `commit_host!` or
+    ## `rollback_host!`. An empty code when it went well.
+    begin_host! : List((Str, Str)) => { code : Str, message : Str }
+
+    ## Ends the transaction: its changes hold.
+    commit_host! : () => { code : Str, message : Str }
+
+    ## Ends the transaction: its changes go.
+    rollback_host! : () => { code : Str, message : Str }
+
     run_host! : List((Str, Str)), List(Sql.Param), Str => {
         affected : U64,
         columns : List(Str),

@@ -109,7 +109,7 @@ fn the_pool_shares_its_connections() {
     }
     let rows = db.run("SELECT count(*) AS n FROM t", &[]).unwrap();
     assert_eq!(rows.rows, vec![vec![Value::Int(160)]]);
-    assert!(db.state.lock().unwrap().open <= 2);
+    assert!(db.pool.state.lock().unwrap().open <= 2);
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn no_database_is_an_error_not_a_hang() {
     let e = db.run("SELECT 1", &[]).unwrap_err();
     assert_eq!(e.code, "08000");
     // The failed connection gave its place back.
-    assert_eq!(db.state.lock().unwrap().open, 0);
+    assert_eq!(db.pool.state.lock().unwrap().open, 0);
 }
 
 #[test]
@@ -201,6 +201,61 @@ fn a_failed_query_as_a_user_leaves_the_connection_good() {
 }
 
 #[test]
+fn a_transaction_commits_all_or_rolls_back_all() {
+    let Some(db) = pool("transaction", NOTES) else {
+        return;
+    };
+    // Its queries see each other's changes, and run as its user.
+    let mut tx = db.begin(&as_user("bob")).unwrap();
+    tx.run("INSERT INTO notes VALUES ('b2', 'bob', false)", &[])
+        .unwrap();
+    let rows = tx.run("SELECT count(*) FROM notes", &[]).unwrap();
+    assert_eq!(rows.rows, vec![vec![Value::Int(3)]]);
+    // Others don't, until it commits.
+    assert_eq!(ids(&db, &as_user("bob")), [text("a2"), text("b1")]);
+    tx.commit().unwrap();
+    assert_eq!(
+        ids(&db, &as_user("bob")),
+        [text("a2"), text("b1"), text("b2")]
+    );
+    // Dropped without a commit, nothing of it holds, also after a failed query.
+    let mut tx = db.begin(&as_user("bob")).unwrap();
+    tx.run("INSERT INTO notes VALUES ('b3', 'bob', false)", &[])
+        .unwrap();
+    assert!(tx.run("SELEC 1", &[]).is_err());
+    drop(tx);
+    let mut tx = db.begin(&as_user("bob")).unwrap();
+    tx.run("INSERT INTO notes VALUES ('b4', 'bob', false)", &[])
+        .unwrap();
+    drop(tx);
+    assert_eq!(
+        ids(&db, &as_user("bob")),
+        [text("a2"), text("b1"), text("b2")]
+    );
+    // The settings end with the transaction.
+    assert_eq!(ids(&db, &[]), [text("a2")]);
+}
+
+#[test]
+fn a_transaction_gives_its_connection_back() {
+    let Some(db) = pool("transaction_pool", NOTES) else {
+        return;
+    };
+    // The test pool has 2 connections: many transactions after another don't use them up.
+    for _ in 0..5 {
+        let tx = db.begin(&as_user("ann")).unwrap();
+        drop(tx);
+        db.begin(&[]).unwrap().commit().unwrap();
+    }
+    assert_eq!(ids(&db, &as_user("ann")), [text("a1"), text("a2")]);
+    let e = db
+        .begin(&[("search_path".to_owned(), "x".to_owned())])
+        .err()
+        .unwrap();
+    assert_eq!(e.code, "42602");
+}
+
+#[test]
 fn only_punk_settings_can_be_given() {
     let Some(db) = pool("settings", NOTES) else {
         return;
@@ -225,7 +280,7 @@ fn a_role_that_skips_row_level_security_is_refused() {
     let e = db.run("SELECT 1 AS one", &[]).unwrap_err();
     assert_eq!(e.code, "42501");
     assert!(e.message.contains("row-level security"), "{}", e.message);
-    assert_eq!(db.state.lock().unwrap().open, 0);
+    assert_eq!(db.pool.state.lock().unwrap().open, 0);
 }
 
 const V1: &str = "-- made by punk

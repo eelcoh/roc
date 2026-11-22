@@ -81,6 +81,24 @@ pub trait Database: Send + Sync + 'static {
             ))
         }
     }
+
+    /// Begins a transaction with these settings (as [`Database::run_as`]): what punk's
+    /// `Db.transaction!` and `Db.transactionAs! user` give. The queries of the app run in it until
+    /// the host commits it, or drops it, which rolls it back.
+    fn begin(&self, settings: &[(String, String)]) -> Result<Box<dyn Transaction>, DbError> {
+        let _ = settings;
+        Err(DbError::new("0A000", "this database has no transactions"))
+    }
+}
+
+/// A transaction that [`Database::begin`] began: its queries see each other's changes, and
+/// others see them all once it commits, or none when it is dropped without a commit.
+pub trait Transaction {
+    /// Runs `sql` in the transaction.
+    fn run(&mut self, sql: &str, params: &[Value]) -> Result<Rows, DbError>;
+
+    /// Makes the changes of the transaction hold.
+    fn commit(self: Box<Self>) -> Result<(), DbError>;
 }
 
 impl<T: Database + ?Sized> Database for std::sync::Arc<T> {
@@ -96,6 +114,10 @@ impl<T: Database + ?Sized> Database for std::sync::Arc<T> {
     ) -> Result<Rows, DbError> {
         (**self).run_as(settings, sql, params)
     }
+
+    fn begin(&self, settings: &[(String, String)]) -> Result<Box<dyn Transaction>, DbError> {
+        (**self).begin(settings)
+    }
 }
 
 impl<T: Database + ?Sized> Database for Box<T> {
@@ -110,6 +132,10 @@ impl<T: Database + ?Sized> Database for Box<T> {
         params: &[Value],
     ) -> Result<Rows, DbError> {
         (**self).run_as(settings, sql, params)
+    }
+
+    fn begin(&self, settings: &[(String, String)]) -> Result<Box<dyn Transaction>, DbError> {
+        (**self).begin(settings)
     }
 }
 
