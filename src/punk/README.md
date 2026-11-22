@@ -369,6 +369,16 @@ so `a + b` still crashes on overflow, as in Roc.
 `Clock` and `Random`. Its host is Rust, on ambit's cli platform. See
 `platforms/cli/README.md`.
 
+`platforms/server` is for HTTP servers (`platforms/server/README.md`), and
+`platforms/tui` for terminal apps in the Elm architecture: `init`, `update`
+and `view`, with effects as `Cmd`s (`File.read path Loaded`), on ambit's
+tui platform. See `platforms/tui/README.md` and
+`examples/punk/library/` (crossload's library view).
+
+Package names may be capitalized, as modules are: `{ Platform: platform
+"...", Json: "..." }` and `import Platform.Http`, `import Json.Decode as D`.
+The translator gives Roc its lowercase names (`pf`, `json`).
+
 ## Smaller Elm habits
 
 - **Accessor functions.** `.name` on its own is `fn r -> r.name`:
@@ -376,6 +386,11 @@ so `a + b` still crashes on overflow, as in Roc.
 - **`Result.andThen`** chains steps that may fail (Roc's new `Try.and_then`):
   `grid |> List.get row |> Result.andThen (List.get col)`.
 - **`Set.empty` and `Dict.empty`** are values, as in Elm (Roc's `Set.empty()`).
+  So is a constant of a Roc module written as a function without arguments
+  (`Cmd.none : () -> Cmd(msg)`: Roc has no polymorphic constants).
+- **Tags are functions**, as in Elm: a tag of the file's own types used as a
+  value (`File.read path Loaded`, `List.map2 Moved xs ys`) is a lambda that
+  makes it.
 - **`import Grid exposing (Grid, at)`** takes Elm's parentheses (and
   `Shape(..)`) as well as Roc's brackets.
 - **A type alias with the module's name**, as in Elm: `module Grid exposing

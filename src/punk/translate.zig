@@ -105,9 +105,63 @@ pub fn translateMapped(arena: Allocator, src: []const u8, diag: *Diagnostic, res
     const toks = try lex(arena, src, diag);
     var p = Parser{ .a = arena, .src = src, .toks = toks, .diag = diag };
     const items = try p.parseModule();
+    try renamePackages(arena, items);
     var e = Emitter{ .a = arena, .diag = diag, .src = src, .resolver = resolver };
     try e.emitModule(items);
     return .{ .roc = e.buf.items, .marks = e.marks.items };
+}
+
+/// Packages in punk are capitalized, as modules are: `{ Platform: platform
+/// "...", Json: "..." }` and `import Platform.Http`. Roc wants a lowercase
+/// name, so the app header and the imports get Roc's: `Platform` is `pf`,
+/// any other `Name` is `name` (snake case). Lowercase names stay as they are.
+fn renamePackages(a: Allocator, items: []Item) Error!void {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (items) |*item| {
+        if (item.kind != .raw or !std.mem.startsWith(u8, item.kind.raw, "app")) continue;
+        const raw = item.kind.raw;
+        const open = std.mem.findScalar(u8, raw, '{') orelse continue;
+        var out: std.ArrayList(u8) = .empty;
+        try out.appendSlice(a, raw[0 .. open + 1]);
+        var i = open + 1;
+        var in_string = false;
+        while (i < raw.len) {
+            const c = raw[i];
+            if (c == '"') in_string = !in_string;
+            if (!in_string and std.ascii.isUpper(c) and !std.ascii.isAlphanumeric(raw[i - 1])) {
+                var end = i;
+                while (end < raw.len and (std.ascii.isAlphanumeric(raw[end]) or raw[end] == '_')) end += 1;
+                var after = end;
+                while (after < raw.len and (raw[after] == ' ' or raw[after] == '\t')) after += 1;
+                if (after < raw.len and raw[after] == ':') {
+                    try names.append(a, raw[i..end]);
+                    try out.appendSlice(a, try packageName(a, raw[i..end]));
+                    i = end;
+                    continue;
+                }
+            }
+            try out.append(a, c);
+            i += 1;
+        }
+        item.kind = .{ .raw = out.items };
+    }
+    if (names.items.len == 0) return;
+    for (items) |*item| {
+        if (item.kind != .raw or !std.mem.startsWith(u8, item.kind.raw, "import ")) continue;
+        const raw = item.kind.raw;
+        const start = "import ".len + (std.mem.findNone(u8, raw["import ".len..], " \t") orelse continue);
+        const dot = std.mem.findScalarPos(u8, raw, start, '.') orelse continue;
+        const first = raw[start..dot];
+        for (names.items) |name| if (std.mem.eql(u8, name, first)) {
+            item.kind = .{ .raw = try std.mem.concat(a, u8, &.{ raw[0..start], try packageName(a, name), raw[dot..] }) };
+            break;
+        };
+    }
+}
+
+fn packageName(a: Allocator, name: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.eql(u8, name, "Platform")) return "pf";
+    return snake(a, name);
 }
 
 /// The span of the source the bytes `start..end` of the translation came
@@ -1877,6 +1931,10 @@ pub const Emitter = struct {
     marks: std.ArrayList(Mark) = .empty,
     /// The types the file defines, which win over Elm's (`Int`, `Maybe`).
     local_types: std.StringHashMapUnmanaged(void) = .empty,
+    /// The tags of this file's own types that take arguments, with how many:
+    /// `Loaded` of `type Msg = Loaded (Result Str Str)` takes one. Used as a
+    /// value, such a tag is a function, as in Elm.
+    tag_arity: std.StringHashMapUnmanaged(usize) = .empty,
     /// The helpers for Elm names the file uses (`elm.zig`), in order of use.
     helpers: std.ArrayList(struct { h: elm.Helper, at: []const u8 }) = .empty,
     indent: u32 = 0,
@@ -1963,7 +2021,10 @@ pub const Emitter = struct {
     fn emitModule(e: *Emitter, items: []Item) Error!void {
         for (items) |item| switch (item.kind) {
             .type_alias => |t| try e.local_types.put(e.a, t.name, {}),
-            .type_nominal => |t| try e.local_types.put(e.a, t.name, {}),
+            .type_nominal => |t| {
+                try e.local_types.put(e.a, t.name, {});
+                for (t.alts) |alt| if (tagOf(alt)) |tag| if (tag.n > 0) try e.tag_arity.put(e.a, tag.name, tag.n);
+            },
             else => {},
         };
         try e.findSqlQuery(items);
@@ -2945,6 +3006,10 @@ pub const Emitter = struct {
     fn emitCallee(e: *Emitter, func: *Expr) Error!void {
         const f = if (func.* == .paren and func.paren.* == .ident) func.paren else func;
         if (f.* == .ident) return e.emitValueIdent(f.ident);
+        if (f.* == .upper) {
+            try e.checkExposed(f.upper);
+            return e.w(f.upper);
+        }
         if (f.* == .lambda or !isAtomic(f)) {
             try e.w("(");
             try e.emitExpr(f);
@@ -3076,8 +3141,15 @@ pub const Emitter = struct {
                 }
                 // `Set.empty` and `Dict.empty` are values in Elm and
                 // functions without arguments in Roc.
+                // So are the constants of a Roc module that can be used at
+                // any type (`Cmd.none : () -> Cmd(msg)` of the tui
+                // platform): Roc gives a polymorphic value only as a function.
                 if (std.mem.findScalar(u8, name, '.') != null) {
                     if (stdlib.lookup(stdlib.rocName(try snakeQualified(e.a, name)))) |f| if (f.arity == 0) {
+                        try e.emitIdent(name);
+                        return e.w("()");
+                    };
+                    if (name[name.len - 1] != '!') if (try e.calleeArity(x)) |c| if (c.f.arity == 0) {
                         try e.emitIdent(name);
                         return e.w("()");
                     };
@@ -3086,7 +3158,17 @@ pub const Emitter = struct {
             },
             .upper => |s| {
                 try e.checkExposed(s);
+                // A tag with arguments on its own is a function that makes
+                // it: `File.read path Loaded` is `|x| Loaded(x)`.
+                const n = e.tag_arity.get(s) orelse 0;
+                if (n == 0) return e.w(s);
+                try e.w("|");
+                for (0..n) |i| try e.buf.print(e.a, "{s}punk_t{d}", .{ if (i > 0) ", " else "", i + 1 });
+                try e.w("| ");
                 try e.w(s);
+                try e.w("(");
+                for (0..n) |i| try e.buf.print(e.a, "{s}punk_t{d}", .{ if (i > 0) ", " else "", i + 1 });
+                try e.w(")");
             },
             .ident_raw, .literal => |s| try e.w(s),
             .string => |s| try e.emitString(s),

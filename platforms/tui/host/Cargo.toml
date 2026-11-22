@@ -1,0 +1,23 @@
+[package]
+name = "punk-tui"
+description = "Host of punkroc's tui platform: a compiled punk app as an ambit tui App."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A library, not a program: the crate of an app links the app's archive
+# (built by `punk build`) next to this, and its wiring picks the folder and
+# the clock, and the backend: ambit's native terminal in its `main`, ambit's
+# sim in its tests. See platforms/tui/README.md.
+[lib]
+path = "src/lib.rs"
+
+# ambit is used as a library, pinned to one commit, as in platforms/server/host.
+[dependencies]
+ambit-caps = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-caps-dir = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-tui = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+punk-roc-abi = { path = "../../roc-abi" }
+# The same version and features as ambit's workspace, so there is one ratatui in the tree.
+ratatui-widgets = { version = "0.3.2", default-features = false }
+tracing = "0.1"

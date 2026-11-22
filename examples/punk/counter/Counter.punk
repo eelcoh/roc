@@ -1,0 +1,38 @@
+app [Model, Msg, main] { Platform: platform "../../../platforms/tui/main.roc" }
+
+import Platform.Tui exposing [Event]
+import Platform.Cmd
+import Platform.View
+
+{-| The smallest punk terminal app: counts key presses, and ten more every
+second. q quits.
+-}
+
+type alias Model =
+    { count : Int
+    }
+
+type Msg
+    = Tick
+
+main =
+    { init = init, update = update, view = view }
+
+init : (Model, Cmd Msg)
+init =
+    ({ count = 0 }, Cmd.after 1000 Tick)
+
+update : Event Msg -> Model -> (Model, Cmd Msg)
+update = fn event, model ->
+    case event of
+        Key (Char "q") -> (model, Cmd.quit)
+        Key _ -> ({ model | count = model.count + 1 }, Cmd.none)
+        Msg Tick -> ({ model | count = model.count + 10 }, Cmd.after 1000 Tick)
+        _ -> (model, Cmd.none)
+
+view : Model -> View
+view = fn model ->
+    View.column
+        [ View.height 1 (View.text "Counter")
+        , View.block "Count" (View.text (String.fromInt model.count))
+        ]

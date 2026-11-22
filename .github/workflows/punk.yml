@@ -73,6 +73,7 @@ jobs:
           (cd platforms/cli/host && cargo test --locked)
           (cd platforms/server/host && cargo test --locked)
           (cd platforms/server/postgres && cargo test --locked)
+          (cd platforms/tui/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
@@ -82,6 +83,10 @@ jobs:
           (cd examples/punk/shortener/server && cargo test --locked)
           (cd examples/punk/shortener-postgres/server && cargo test --locked)
           (cd examples/punk/notes/server && cargo test --locked)
+          # The terminal apps, on ambit's sim terminal: the counter and
+          # crossload's library view.
+          (cd examples/punk/counter/tui && cargo test --locked)
+          (cd examples/punk/library/tui && cargo test --locked)
 
   upstream:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -148,6 +153,7 @@ jobs:
           (cd platforms/cli/host && cargo test --locked)
           (cd platforms/server/host && cargo test --locked)
           (cd platforms/server/postgres && cargo test --locked)
+          (cd platforms/tui/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
@@ -157,6 +163,10 @@ jobs:
           (cd examples/punk/shortener/server && cargo test --locked)
           (cd examples/punk/shortener-postgres/server && cargo test --locked)
           (cd examples/punk/notes/server && cargo test --locked)
+          # The terminal apps, on ambit's sim terminal: the counter and
+          # crossload's library view.
+          (cd examples/punk/counter/tui && cargo test --locked)
+          (cd examples/punk/library/tui && cargo test --locked)
       - name: Push the branch and open a PR
         if: steps.merge.outputs.nothing != 'yes'
         run: |

@@ -1,0 +1,30 @@
+[package]
+name = "punk-counter"
+description = "A small punk terminal app (../Counter.punk) on punkroc's tui platform: the platform's own example."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "punk-counter"
+path = "src/main.rs"
+
+# ambit, pinned to the same commit as platforms/tui/host.
+[dependencies]
+ambit-caps = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-caps-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-tui-native = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+punk-tui = { path = "../../../../platforms/tui/host" }
+
+[dev-dependencies]
+ambit-caps-sim = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-tui = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+ambit-tui-sim = { git = "https://github.com/eelcoh/ambit", rev = "b5f977178e408a4aa96c75d7ed073bb2f65be414" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
