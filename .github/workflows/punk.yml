@@ -3,7 +3,7 @@
 # - golden: on every push to and PR into `punkroc`, build the compiler and
 #   the Rust host of platforms/cli, run the translator's and the host's unit
 #   tests and the golden tests of examples/punk/ (test/punk/golden.sh), and
-#   the Postgres tests against a postgres:16 service container.
+#   the Postgres and Mongo tests against postgres:16 and mongo:7 service containers.
 # - upstream: on the 1st and 15th of each month (and by hand), merge
 #   roc-lang/roc's main into a new branch, run the same tests on it, and open
 #   a PR into `punkroc` only when they pass. On a conflict or a failing test
@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    # For the Postgres tests of platforms/server/postgres and the apps on Postgres.
+    # For the Postgres and Mongo tests of platforms/server and the apps on them.
     services:
       postgres:
         image: postgres:16
@@ -47,9 +47,20 @@ jobs:
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     env:
       PUNK_TEST_POSTGRES: postgres://postgres:punk@localhost:5432/postgres
       PUNK_REQUIRE_POSTGRES: "1"
+      PUNK_TEST_MONGO: mongodb://localhost:27017
+      PUNK_REQUIRE_MONGO: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
       - &setup_zig
@@ -73,15 +84,17 @@ jobs:
           (cd platforms/cli/host && cargo test --locked)
           (cd platforms/server/host && cargo test --locked)
           (cd platforms/server/postgres && cargo test --locked)
+          (cd platforms/server/mongo && cargo test --locked)
           (cd platforms/tui/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
           # The server apps: ambit's spec against the punk shortener, on a
-          # key-value store and on Postgres, and the notes kept apart by
+          # key-value store, on Postgres and on Mongo, and the notes kept apart by
           # row-level security.
           (cd examples/punk/shortener/server && cargo test --locked)
           (cd examples/punk/shortener-postgres/server && cargo test --locked)
+          (cd examples/punk/shortener-mongo/server && cargo test --locked)
           (cd examples/punk/notes/server && cargo test --locked)
           # The terminal apps, on ambit's sim terminal: the counter and
           # crossload's library view.
@@ -96,7 +109,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    # For the Postgres tests of platforms/server/postgres and the apps on Postgres.
+    # For the Postgres and Mongo tests of platforms/server and the apps on them.
     services:
       postgres:
         image: postgres:16
@@ -109,10 +122,21 @@ jobs:
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     env:
       GH_TOKEN: ${{ github.token }}
       PUNK_TEST_POSTGRES: postgres://postgres:punk@localhost:5432/postgres
       PUNK_REQUIRE_POSTGRES: "1"
+      PUNK_TEST_MONGO: mongodb://localhost:27017
+      PUNK_REQUIRE_MONGO: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
         with:
@@ -153,15 +177,17 @@ jobs:
           (cd platforms/cli/host && cargo test --locked)
           (cd platforms/server/host && cargo test --locked)
           (cd platforms/server/postgres && cargo test --locked)
+          (cd platforms/server/mongo && cargo test --locked)
           (cd platforms/tui/host && cargo test --locked)
           zig build roc
           sh test/punk/setup.sh
           sh test/punk/golden.sh
           # The server apps: ambit's spec against the punk shortener, on a
-          # key-value store and on Postgres, and the notes kept apart by
+          # key-value store, on Postgres and on Mongo, and the notes kept apart by
           # row-level security.
           (cd examples/punk/shortener/server && cargo test --locked)
           (cd examples/punk/shortener-postgres/server && cargo test --locked)
+          (cd examples/punk/shortener-mongo/server && cargo test --locked)
           (cd examples/punk/notes/server && cargo test --locked)
           # The terminal apps, on ambit's sim terminal: the counter and
           # crossload's library view.

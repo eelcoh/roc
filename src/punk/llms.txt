@@ -323,6 +323,7 @@ Positions are 1-based and in the `.punk` file. `code` is stable:
 | `P102` | `dbg` outside an `expect` |
 | `P201` | an exposed value of a module has no type annotation |
 | `P301` | the SQL of `Sql.query` is not a string literal: pass values as parameters (`$1`) |
+| `P302` | a Mongo collection or field name (`Mongo.collection`, `Filter.*`, `Update.*`, `Mongo.sortBy`) is not a string literal, or is empty or starts with `$` |
 | `P401` | a `table` declaration: its row type is not a record of storable columns, its key is not a column, or a policy line is missing |
 | `P402` | a query that can't run in the database: not a pipeline from a table to `Db.all`/`first`/`update`/`delete`, or a function the database can't run |
 | `P403` | a query uses a column the table doesn't have, or a value of the wrong type |
@@ -579,6 +580,63 @@ Columns are read as bool, int (`int2/4/8`), float (`float4/8`) or text
 `extract(epoch from t)::int8`). A parameter must have the type the query
 expects (`Sql.int` for an `integer` column). Each query commits on its own:
 there are no transactions yet.
+
+### Mongo: documents
+
+The document database the wiring gives the app; the wiring also says which
+collections it may read or change. Documents are written with `Bson` (as
+`Json.Encode`) and read with `Doc` decoders (as `Json.Decode`). Searches are
+`Filter`s, changes `Update`s: the host writes Mongo's operators, a value is
+always data, and collection and field names are string literals (P302).
+
+```
+import Platform.Mongo
+import Platform.Bson
+import Platform.Doc
+import Platform.Filter
+import Platform.Update
+
+links : Mongo.Collection
+links =
+    Mongo.collection "links"
+
+linkDecoder : Doc.Decoder Link
+linkDecoder =
+    Doc.map2 (fn url, created -> { url, created })
+        (Doc.field "url" Doc.text)
+        (Doc.field "created" Doc.int)
+
+findLink! : Str => Result (Maybe Link) _
+findLink! = fn id ->
+    links
+        |> Mongo.find (Filter.equals "_id" (Bson.text id))
+        |> Mongo.first! linkDecoder
+```
+
+```
+Mongo.collection : Str -> Mongo.Collection                 -- the Str must be a literal (P302)
+Mongo.find : Filter -> Mongo.Collection -> Mongo.Find
+Mongo.sortBy, Mongo.sortByDescending : Str -> Mongo.Find -> Mongo.Find   -- the last one decides first
+Mongo.drop, Mongo.take : Int -> Mongo.Find -> Mongo.Find
+Mongo.all! : Doc.Decoder a -> Mongo.Find => Result (List a) _
+Mongo.first! : Doc.Decoder a -> Mongo.Find => Result (Maybe a) _
+Mongo.count! : Mongo.Find => Result Int _
+Mongo.insert! : Bson.Value -> Mongo.Collection => Result () _        -- a taken _id is code "11000"
+Mongo.insertIfNew! : Bson.Value -> Mongo.Collection => Result Bool _ -- False when the _id is taken
+Mongo.update! : Filter -> List Update -> Mongo.Collection => Result Int _   -- documents matched
+Mongo.delete! : Filter -> Mongo.Collection => Result Int _
+Filter.equals, notEquals, lessThan, atMost, greaterThan, atLeast : Str -> Bson.Value -> Filter
+Filter.oneOf : Str -> List Bson.Value -> Filter    -- Filter.exists, Filter.missing : Str -> Filter
+Filter.all, Filter.any : List Filter -> Filter     -- Filter.everything : Filter
+Update.set : Str -> Bson.Value -> Update           -- Update.unset : Str -> Update, Update.increment : Str -> Int -> Update
+Bson.text, Bson.int, Bson.float, Bson.bool, Bson.objectId (hex Str), Bson.time (ms Int) -- Bson.null
+Bson.list : List Bson.Value -> Bson.Value          -- Bson.object : List (Str, Bson.Value) -> Bson.Value
+Bson.nullable : (a -> Bson.Value) -> Maybe a -> Bson.Value
+Doc.field : Str -> Doc.Decoder a -> Doc.Decoder a  -- Doc.optionalField : Str -> Doc.Decoder a -> Doc.Decoder (Maybe a)
+Doc.text, Doc.int, Doc.float, Doc.bool, Doc.objectId, Doc.time : Doc.Decoder _
+Doc.list, Doc.nullable, Doc.map ... Doc.map5, Doc.andThen, Doc.oneOf, Doc.succeed, Doc.fail, Doc.decode
+-- errors: MongoErr { code : Str, message : Str } ("11000" duplicate key, "13" collection not allowed, "6" no server), DocErr Str
+```
 
 ### JSON: the `json` package
 

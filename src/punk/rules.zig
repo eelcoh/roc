@@ -11,6 +11,7 @@
 //! | P102 | `dbg` only inside an `expect` test |
 //! | P201 | what a module exposes has a type annotation |
 //! | P301 | the SQL of `Sql.query` is text written in the program |
+//! | P302 | the names of Mongo collections and fields (`Mongo.collection`, `Filter.*`, `Update.*`, `Mongo.sortBy`) are text written in the program |
 //! | P401 | a `table` has a row type that can be stored, a key it has, and says who may read, insert, update and delete |
 //! | P402 | a query is a pipeline from a table, and its functions can run in the database |
 //! | P403 | a query uses columns the table has, with values of their type |
@@ -23,6 +24,7 @@ pub const Rule = enum {
     dbg_outside_test,
     exposed_without_annotation,
     sql_not_literal,
+    mongo_name_not_literal,
     table_decl,
     not_in_database,
     query_type,
@@ -36,6 +38,7 @@ pub const Rule = enum {
             .dbg_outside_test => "P102",
             .exposed_without_annotation => "P201",
             .sql_not_literal => "P301",
+            .mongo_name_not_literal => "P302",
             .table_decl => "P401",
             .not_in_database => "P402",
             .query_type => "P403",

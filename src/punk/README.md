@@ -337,6 +337,7 @@ tool or an agent can recognise it without reading the text
 | `P102` | `dbg` is only allowed inside an `expect` test, so no debug output stays behind. |
 | `P201` | Everything a module exposes has a type annotation (with `exposing (..)`: every top-level value). Apps are exempt: the platform fixes the type of `main!`. |
 | `P301` | The SQL of `Sql.query` (server platform) is a string literal without `${...}`, and `Sql.query` is only used by calling it. Values go in as parameters (`$1`), so no request can change what a query does. |
+| `P302` | The name of a Mongo collection (`Mongo.collection`) or field (`Filter.*`, `Update.*`, `Mongo.sortBy`) is a string literal, not empty, and no part of it starts with `$`; these functions are only used by calling them. A request can't choose which collection or field a query uses, and a name can't be an operator. |
 | `P401` | A `table` has a record of storable columns as its rows (`Str`, `Int`, `Float`, `Bool`, `Maybe` of these), a key that is one of them, and says who may read, insert, update and delete. No rows are open by accident. |
 | `P402` | A query is a pipeline from a table (`join`, `filter`, `sortBy`, `drop`, `take`, `map`, in that order) that ends in `Db.all`, `Db.first`, `Db.update` or `Db.delete` (or is a `Db.insert`), and its functions can run in the database (src/punk/query.zig). |
 | `P403` | A query uses columns its table has, with values of their type. |
